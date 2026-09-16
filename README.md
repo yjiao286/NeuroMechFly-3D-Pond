@@ -20,7 +20,7 @@ assembles, simulates and renders the **real NeuroMechFly** body model — micro-
 
 *MuJoCo offscreen render of the model assembled by [`real_fly_demo.py`](real_fly_demo.py): 70 body
 segments, 126 rotational DoF, 132 actuators (126 position + 6 tarsal adhesion), 2 eye cameras.
-Not a game asset — see [§5](#5-the-real-fly-flygym--neuromechfly-pipeline).*
+Not a game asset — see [§5](#5--the-real-fly-flygym--neuromechfly-pipeline).*
 
 ![The fly's compound-eye readout: fisheye camera view and the 721-ommatidia mosaic](docs/images/fly-vision.png)
 
@@ -35,15 +35,15 @@ rectangular image never reaches the brain.*
 
 | § | Section |
 |---|---|
-| 1 | [System overview](#1-system-overview) |
-| 2 | [The spiking agent](#2-the-spiking-agent) |
-| 3 | [Renderer](#3-renderer) |
-| 4 | [Scenery, modelling and materials](#4-scenery-modelling-and-materials) |
-| 5 | [The real fly: FlyGym / NeuroMechFly pipeline](#5-the-real-fly-flygym--neuromechfly-pipeline) |
-| 6 | [Related work](#6-related-work) |
-| 7 | [Build, run, controls](#7-build-run-controls) |
-| 8 | [Verification](#8-verification) |
-| 9 | [Known limitations](#9-known-limitations) |
+| 1 | [System overview](#1--system-overview) |
+| 2 | [The spiking agent](#2--the-spiking-agent) |
+| 3 | [Renderer](#3--renderer) |
+| 4 | [Scenery, modelling and materials](#4--scenery-modelling-and-materials) |
+| 5 | [The real fly: FlyGym / NeuroMechFly pipeline](#5--the-real-fly-flygym--neuromechfly-pipeline) |
+| 6 | [Related work](#6--related-work) |
+| 7 | [Build, run, controls](#7--build-run-controls) |
+| 8 | [Verification](#8--verification) |
+| 9 | [Known limitations](#9--known-limitations) |
 
 ---
 
@@ -258,7 +258,7 @@ same way (`Game.draw()` in a 60-iteration loop, warm cache).
   `pygame.sndarray`; with no audio device the game runs silently.
 - **The game agent is a behavioural model, not a biophysical one** — four hand-tuned LIF circuits
   chosen for readability and interaction latency. The scientific model is
-  [§5](#5-the-real-fly-flygym--neuromechfly-pipeline).
+  [§5](#5--the-real-fly-flygym--neuromechfly-pipeline).
 - **FlyGym 2.1.0 sensor naming.** Per-leg ground-contact sensors reference element names that do
   not exist, so `real_fly_demo.py` composes with `add_ground_contact_sensors=False`; contact
   forces remain available through `get_bodysegment_contact_forces()`. Upstream issue.
