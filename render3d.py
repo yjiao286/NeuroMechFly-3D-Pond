@@ -380,11 +380,13 @@ def polyline(painter, cam, pts3, color, width=1, layer=4):
     painter.add(depth, draw)
 
 
-def limb(painter, cam, a, b, r0, color, bias=0.0, layer=4, taper=0.62, shade_ratio=0.86):
+def limb(painter, cam, a, b, r0, color, bias=0.0, layer=4, taper=0.62,
+         shade_ratio=0.86, cap=False):
     """锥形肢体/茎：近端半径 r0、远端 r0×taper，带圆柱明暗。
 
     用于青蛙与果蝇的腿、芦苇茎等"有粗细变化的杆状物"——比等宽线段更像肢体。
     关节处用亮色填充(不是暗色圆帽), 这样两段肢体接在一起看不出"球关节"。
+    cap=False(默认) 不加末端圆帽：相邻两段共用同一端点时天然连成一根肢体。
     bias>0 = 视觉上后置(与 segment 一致)。
     """
     va, vb = cam.view(a), cam.view(b)
@@ -420,11 +422,11 @@ def limb(painter, cam, a, b, r0, color, bias=0.0, layer=4, taper=0.62, shade_rat
             ox, oy = lx * w0 * 0.34, ly * w0 * 0.34
             pygame.draw.line(s, core, (p0[0] + ox, p0[1] + oy), (p1[0] + ox, p1[1] + oy),
                              max(1, int(w0)))
-        # 关节处只用亮色补圆, 不画暗色外圈——否则每两段之间都顶着一颗"球关节"
-        if ra >= 2.0:
+        # 只在需要圆头时补端帽(细趾/触角), 粗肢体不加——否则每段之间都顶着一颗"珠子"
+        if cap and ra >= 2.0:
             pygame.draw.circle(s, core, (int(pa[0] + lx * ra * 0.30),
                                          int(pa[1] + ly * ra * 0.30)), max(1, int(ra * 0.86)))
-        if rb >= 2.0:
+        if cap and rb >= 2.0:
             pygame.draw.circle(s, core, (int(pb[0] + lx * rb * 0.30),
                                          int(pb[1] + ly * rb * 0.30)), max(1, int(rb * 0.86)))
 

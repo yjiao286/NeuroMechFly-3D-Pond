@@ -196,27 +196,31 @@ class Frog:
         静止时是青蛙的坐姿——膝略微顶出身体轮廓, 长脚掌贴着身体侧面向前收；
         游动/跳跃时腿才蹬开(swing 驱动)。"""
         kick = swing / 9.0 if not airborne else 1.0      # -1 ~ 1
-        hip = self._local(-6, side * 16, 9.0)
+        hip = self._local(-8, side * 15, 9.5)
         if airborne:                                     # 腾空: 腿向后伸展
-            knee = self._local(-27, side * 21, 8.0)
-            ankle = self._local(-15, side * 27, 7.0)
-            toe = self._local(3, side * 25, 6.5)
+            knee = self._local(-30, side * 20, 8.0)
+            ankle = self._local(-16, side * 26, 7.0)
+            toe = self._local(2, side * 24, 6.5)
         else:                                            # 坐姿: 股向后外、胫折向前、脚掌贴身边
-            knee = self._local(-22 - 3.0 * kick, side * 29 + 2.0 * abs(kick), 6.5)
-            ankle = self._local(2 + 4.0 * kick, side * 30 + 2.0 * abs(kick),
-                                gz - self.z + 2.0)
-            toe = self._local(16 + 3.0 * kick, side * 27, gz - self.z + 1.2)
-        # 股部：贴在大腿上的扁平肌肉块(椭圆), 比一根粗筒自然得多
-        femur_ang = math.atan2(knee.y - hip.y, knee.x - hip.x)
-        thigh = hip.lerp(knee, 0.48)
-        blob(painter, cam, thigh.x, thigh.y, hip.z - 4.0, 12.5, 8.0, 8.0,
-             mix(skin, dark, 0.16), heading=femur_ang, layers=9, taper=0.40, bias=0.55)
-        limb(painter, cam, knee, ankle, 5.0, skin, bias=0.3, taper=0.6)
-        limb(painter, cam, ankle, toe, 4.0, mix(skin, dark, 0.18), bias=0.2, taper=0.6)
+            knee = self._local(-24 - 3.0 * kick, side * 32 + 2.0 * abs(kick), 6.5)
+            ankle = self._local(1 + 4.0 * kick, side * 33 + 2.0 * abs(kick),
+                                gz - self.z + 2.2)
+            toe = self._local(17 + 3.0 * kick, side * 29, gz - self.z + 1.4)
+        # 股→胫→跗 三段共用端点、不加端帽 → 连成一条会折的腿, 而不是几节珠子
+        limb(painter, cam, hip, knee, 11.5, mix(skin, dark, 0.14), bias=0.6, taper=0.76)
+        limb(painter, cam, knee, ankle, 8.4, skin, bias=0.3, taper=0.74)
+        limb(painter, cam, ankle, toe, 6.0, mix(skin, dark, 0.14), bias=0.2, taper=0.70)
+        # 关节处用同色圆片"抹圆"转角: 既藏住折线的缺口, 又不会留下亮色珠子
+        head_ang = self.heading
+        flat_polygon(painter, cam, ellipse_pts(knee.x, knee.y, knee.z, 8.4, 7.4, head_ang),
+                     skin, bias=0.28)
+        flat_polygon(painter, cam, ellipse_pts(ankle.x, ankle.y, ankle.z, 6.0, 5.2, head_ang),
+                     mix(skin, dark, 0.12), bias=0.18)
         for k in range(4):                                  # 蹼趾：从跗端向前扇开
             ta = self.heading + side * (0.46 - k * 0.30)
             tip = V3(toe.x + math.cos(ta) * 10, toe.y + math.sin(ta) * 10, toe.z)
-            limb(painter, cam, toe, tip, 2.6, mix(skin, dark, 0.28), bias=0.1, taper=0.5)
+            limb(painter, cam, toe, tip, 3.0, mix(skin, dark, 0.26), bias=0.1, taper=0.5,
+                 cap=True)
         web = [toe]                                         # 趾间蹼：薄扇形膜, 让后足读作"桨"
         for k in (0, 3):
             ta = self.heading + side * (0.46 - k * 0.30)
@@ -231,13 +235,14 @@ class Frog:
         else:
             elbow = self._local(24, side * 20, 3.0)
             wrist = self._local(33 + swing * 0.4 * side, side * 16, gz - self.z + 1.0)
-        shoulder = self._local(15, side * 12, 7.0)
-        limb(painter, cam, shoulder, elbow, 5.2, mix(skin, dark, 0.3), bias=0.4)
-        limb(painter, cam, elbow, wrist, 4.0, skin, bias=0.2)
+        shoulder = self._local(14, side * 13, 7.0)
+        limb(painter, cam, shoulder, elbow, 6.4, mix(skin, dark, 0.22), bias=0.4, taper=0.78)
+        limb(painter, cam, elbow, wrist, 4.8, skin, bias=0.2, taper=0.66)
         for k in range(3):
             ta = self.heading + side * (0.42 - k * 0.42)
             tip = V3(wrist.x + math.cos(ta) * 8, wrist.y + math.sin(ta) * 8, wrist.z)
-            limb(painter, cam, wrist, tip, 2.4, mix(skin, dark, 0.25), bias=0.1, taper=0.5)
+            limb(painter, cam, wrist, tip, 2.7, mix(skin, dark, 0.24), bias=0.1, taper=0.5,
+                 cap=True)
 
     def draw(self, painter, cam, t, pads):
         x, y = self.pos
@@ -425,51 +430,51 @@ class FlyBase:
                 kn = L(knee[0], knee[1], (z + 1.0 + gz) / 2 + 0.6)
                 ft = L(foot0[0] + stride, foot0[1], gz + 0.25)
             # 股→胫→跗三段锥形, 关节用亮色补圆(不再是一颗颗球)
-            limb(painter, cam, hp, kn, 0.80, (176, 138, 92), taper=0.72)
-            limb(painter, cam, kn, ft, 0.52, (154, 118, 76), taper=0.55)
-        # 身体: 三段连续椭球(头/胸/腹)而不是一串小球——胸部隆起、腹部向后收细
+            limb(painter, cam, hp, kn, 0.80, (150, 116, 76), taper=0.72)
+            limb(painter, cam, kn, ft, 0.52, (128, 96, 62), taper=0.55)
+        # 身体: 三段连续椭球(头/胸/腹)——偏灰的琥珀棕, 不是橙糖色; 腹部略浅、末端收深
         thc = rot2(1.0, 0, h)
         blob(painter, cam, x + thc[0], y + thc[1], z + 0.1, 3.6, 3.0, 4.8,
-             (204, 146, 90), heading=h, layers=10, taper=0.44, bias=0.8)
+             (168, 126, 84), heading=h, layers=10, taper=0.44, bias=0.8)
         abc = rot2(-4.4, 0, h)
         blob(painter, cam, x + abc[0], y + abc[1], z + 0.2, 3.5, 2.8, 3.6,
-             (224, 182, 126), heading=h, layers=9, taper=0.52, bias=0.55)
+             (186, 146, 98), heading=h, layers=9, taper=0.52, bias=0.55)
         tipc = rot2(-8.0, 0, h)
         sphere(painter, cam, V3(x + tipc[0], y + tipc[1], z + 1.1), 1.6,
-               (150, 102, 66), bias=0.5, sheen=0.6)
+               (118, 84, 56), bias=0.5, sheen=0.55)
         # 刚毛: 胸部一列背中刚毛(少而清楚, 不堆细节)
         for k in range(5):
             bx0, by0 = rot2(-0.6 + 1.1 * k, (k % 2 - 0.5) * 1.3, h)
             b0 = V3(x + bx0, y + by0, z + 3.4)
             b1 = V3(b0.x + math.cos(h + math.pi / 2) * 1.1 * (1 if k % 2 else -1),
                     b0.y + math.sin(h + math.pi / 2) * 1.1 * (1 if k % 2 else -1), z + 4.8)
-            segment(painter, cam, b0, b1, (92, 62, 40), 1, bias=0.5)
+            segment(painter, cam, b0, b1, (74, 52, 34), 1, bias=0.5)
         # 平衡棒（后翅退化成的陀螺仪器官，飞行平衡用）
         for side in (-1, 1):
             hp = V3(x + rot2(-2.6, side * 2.4, h)[0], y + rot2(-2.6, side * 2.4, h)[1], z + 1.4)
             sphere(painter, cam, hp, 0.9, (232, 206, 122), bias=0.5)
         hd = V3(x + rot2(5.9, 0, h)[0], y + rot2(5.9, 0, h)[1], z + 2.3)
-        sphere(painter, cam, hd, 2.5, (208, 158, 102), bias=1.1, sheen=0.7)
+        sphere(painter, cam, hd, 2.5, (172, 128, 84), bias=1.1, sheen=0.7)
         # 触角
         for side in (-1, 1):
             a1 = V3(x + rot2(7.5, side * 0.9, h)[0], y + rot2(7.5, side * 0.9, h)[1], z + 3.0)
             a2 = V3(x + rot2(9.1, side * 1.7, h)[0], y + rot2(9.1, side * 1.7, h)[1], z + 3.3)
-            limb(painter, cam, a1, a2, 0.5, (150, 110, 70), bias=-0.2, taper=0.7)
+            limb(painter, cam, a1, a2, 0.5, (146, 108, 68), bias=-0.2, taper=0.7)
         # 喙/口器：平时也收在头下(果蝇一直带着口器, 进食时才伸出去)
         pb = V3(x + rot2(7.3, 0, h)[0], y + rot2(7.3, 0, h)[1], z + 1.1)
-        sphere(painter, cam, pb, 1.0, (150, 100, 62), bias=1.2, sheen=0.4)
+        sphere(painter, cam, pb, 1.0, (132, 92, 60), bias=1.2, sheen=0.4)
         # 砖红复眼一对：几乎占满头部, 互相贴近成 bilobed 整体(不会误读成两只虫)
         for side in (-1, 1):
             e = V3(x + rot2(6.2, side * 1.5, h)[0], y + rot2(6.2, side * 1.5, h)[1], z + 2.9)
-            sphere(painter, cam, e, 2.6, (222, 52, 38), bias=1.4, sheen=0.8)
+            sphere(painter, cam, e, 2.6, (138, 74, 64), bias=1.4, sheen=0.45)
         # 口器(进食时伸向食饵)
         if mode_eat(self):
             p1 = V3(x + rot2(7.4, 0, h)[0], y + rot2(7.4, 0, h)[1], z + 1.6)
             p2 = V3(x + rot2(11.2, 0, h)[0], y + rot2(11.2, 0, h)[1], gz + 0.8)
-            self._seg(painter, cam, p1, p2, (160, 118, 72), 2)
-            sphere(painter, cam, p2, 1.3, (150, 100, 62), bias=0.3)
+            self._seg(painter, cam, p1, p2, (146, 108, 68), 2)
+            sphere(painter, cam, p2, 1.3, (132, 92, 60), bias=0.3)
         # 双翅: 飞行展开振动(带翅脉), 落地收拢在背上
-        wing_c = (236, 240, 234)
+        wing_c = (228, 233, 231)
         if flying:
             for side in (-1, 1):
                 flap = 0.5 * math.sin(self.wing_phase + (0 if side < 0 else math.pi))
@@ -491,7 +496,7 @@ class FlyBase:
                 dome(painter, cam, pts, wing_c, bias=0.3, sheen=0.16)
                 for (u, s) in ((0.95, 0.9), (0.72, 0.2), (0.45, -0.5)):  # 翅脉
                     limb(painter, cam, W(0.08, 0.2, 0.4), W(u, s, 0.2), 0.22,
-                         (188, 208, 214), bias=0.05, taper=0.6)
+                         (186, 200, 202), bias=0.05, taper=0.6)
                 limb(painter, cam, W(0.10, 1.4, 0.9), W(0.90, 1.5, 0.6), 0.18,
                      (252, 252, 244), bias=0.02, taper=0.8)      # 前缘高光
         else:
@@ -502,7 +507,7 @@ class FlyBase:
 
                 pts = [RL(-0.6, 1.9, 2.5), RL(-5.2, 2.4, 2.6),
                        RL(-9.4, 0.7, 2.3), RL(-8.4, 3.2, 2.1)]
-                dome(painter, cam, pts, (226, 232, 226), bias=0.55, layer=4, sheen=0.18)
+                dome(painter, cam, pts, (220, 227, 224), bias=0.55, layer=4, sheen=0.18)
                 limb(painter, cam, RL(-0.6, 1.9, 2.62), RL(-8.6, 1.6, 2.42), 0.2,
                      (244, 248, 244), bias=0.4, taper=0.7)
 
