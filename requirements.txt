@@ -1,0 +1,3 @@
+# 运行游戏本体所需的最小依赖 / Minimal deps to run the game
+pygame-ce>=2.5.0
+numpy>=1.24

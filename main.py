@@ -1,0 +1,964 @@
+"""果蝇池塘 3D —— 越肩视角控制青蛙蹦跳、吐舌头捕食果蝇。
+
+镜头在青蛙后上方平滑跟随，面向整个池塘；远处是沙岸、岩石、芦苇与灌木丛。
+9 只果蝇里 8 只是脚本化 NPC（觅食 → 进食 → 靠近就逃），只有 1 只由脉冲神经
+网络驱动、会"思考"——它被金色方框标注出来。
+
+所有落地生物都对荷叶高度有感知（脚踩在叶面上而不是陷进去），
+配合逐深度排序与显式层间偏置防穿模。
+
+操作：方向键/WASD 游动 · 空格 跳跃 · F/点击 吐舌 ·
+      B 神经面板 · M 静音 · F11 全屏 · Esc 退出
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import random
+import sys
+
+import pygame
+
+import scenery
+from fly_brain import FlyBrain
+from render3d import (Camera3D, Painter, V3, clamp, ellipse_pts, flat_polygon,
+                      segment, sphere)
+from sounds import SoundKit
+
+W, H = 1280, 800
+FPS = 60
+MARGIN_X, MARGIN_Y = 545, 285          # 蛙与虫的水面活动半幅
+EAT_RADIUS = 60                        # 跳跃落点压杀半径
+TONGUE_RANGE = 200                     # 舌头射程
+TONGUE_CATCH = 17                      # 舌尖捕获半径
+TONGUE_CONE = 1.15                     # 吐舌朝向锥（弧度）
+TARGET_FLIES = 9                       # 存活果蝇数（8 脚本 + 1 神经元）
+GOLD = (255, 200, 60)
+FONT_PATHS = (
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+)
+V2 = pygame.math.Vector2
+VEC = V2                            # 兼容别名
+
+
+def load_cjk_font(size, bold=False):
+    for path in FONT_PATHS:
+        if os.path.exists(path):
+            return pygame.font.Font(path, size)
+    for name in ("pingfangsc", "hiraginosansgb", "stheiti", "arialunicodems"):
+        found = pygame.font.match_font(name, bold=bold)
+        if found:
+            return pygame.font.Font(found, size)
+    return pygame.font.Font(None, size)
+
+
+def lerp_angle(a, b, k):
+    d = (b - a + math.pi) % (2 * math.pi) - math.pi
+    return a + d * k
+
+
+def ang_diff(a, b):
+    return (b - a + math.pi) % (2 * math.pi) - math.pi
+
+
+def rot2(vx, vy, heading):
+    c, s = math.cos(heading), math.sin(heading)
+    return (vx * c - vy * s, vx * s + vy * c)
+
+
+def ground_z(pos, pads, t):
+    """pos 处的地面高度：落在荷叶上=叶面高度(随波起伏)，否则=水面。"""
+    gz = 0.0
+    for p in pads:
+        gz = max(gz, p.height_at(pos, t))
+    return gz
+
+
+# ---------------------------------------------------------------- 青蛙
+class Frog:
+    WALK = 175.0
+    JUMP_TIME = 0.62
+    JUMP_LEN = 310.0
+    JUMP_H = 62.0
+    TONGUE_OUT, TONGUE_HOLD, TONGUE_BACK = 0.11, 0.05, 0.14
+
+    def __init__(self, pos):
+        self.pos = V2(pos)
+        self.z = 0.0                          # 跳跃高度
+        self.heading = math.pi / 2            # 朝向池塘远处（北岸布景）
+        self.state = "ground"
+        self.t = 0.0
+        self.walk_phase = 0.0
+        self.hops = 0
+        self.eaten = 0
+        self.tongue = None                    # {"t", "phase", "target", "tip"}
+        self.cooldown = 0.0
+        self._trail = 0.0
+        self._moving = False
+        rng = random.Random(9)
+        self.skin_spots = [((rng.uniform(-34, 34), rng.uniform(-22, 22)), rng.uniform(3.0, 5.5))
+                           for _ in range(6)]  # 迷彩色皮肤斑点(预生成防抖动)
+
+    def mouth_pos(self):
+        mx, my = rot2(46, 0, self.heading)
+        return V3(self.pos.x + mx, self.pos.y + my, self.z + 9)
+
+    def update(self, dt, move, jump, tongue_cmd, tongue_target, ripples, sounds):
+        landed = False
+        self.cooldown = max(0.0, self.cooldown - dt)
+        if self.state == "ground":
+            self._moving = move.length_squared() > 0
+            if self._moving:
+                self.heading = lerp_angle(self.heading, math.atan2(move.y, move.x),
+                                          1 - math.exp(-10 * dt))
+                self.pos += move * self.WALK * dt
+                self.walk_phase += dt * 9
+                self._trail += dt
+                if self._trail > 0.26:
+                    self._trail = 0.0
+                    ripples.add(self.pos + VEC(0, 12), 0.3)
+            if jump:
+                self.state = "air"
+                self.t = 0.0
+                self.jump_dir = VEC(math.cos(self.heading), math.sin(self.heading))
+                self.hops += 1
+                sounds.croak_()
+                ripples.add(self.pos, 0.6)
+            elif tongue_cmd and self.cooldown <= 0 and not self.tongue and tongue_target:
+                self.tongue = {"t": 0.0, "phase": "out", "target": tongue_target, "tip": None}
+                self.cooldown = 1.1
+                sounds.tongue_()
+        else:
+            self.t += dt
+            self.pos += self.jump_dir * (self.JUMP_LEN / self.JUMP_TIME) * dt
+            x = self.t / self.JUMP_TIME
+            self.z = self.JUMP_H * 4 * x * (1 - x)
+            if self.t >= self.JUMP_TIME:
+                self.state = "ground"
+                self.z = 0.0
+                landed = True
+                ripples.add(self.pos, 1.0)
+                sounds.splash_()
+        self.pos.x = clamp(self.pos.x, -MARGIN_X, MARGIN_X)
+        self.pos.y = clamp(self.pos.y, -MARGIN_Y, MARGIN_Y)
+
+        # 舌头状态机：弹出 → 黏住 → 收回
+        if self.tongue:
+            tw = self.tongue
+            tw["t"] += dt
+            mouth = self.mouth_pos()
+            if tw["phase"] == "out":
+                k = min(1.0, tw["t"] / self.TONGUE_OUT)
+                tw["tip"] = mouth.lerp(tw["target"].tip_pos(), k)
+                if tw["t"] >= self.TONGUE_OUT:
+                    tw["phase"] = "hold"
+                    tw["t"] = 0.0
+            elif tw["phase"] == "hold":
+                tw["tip"] = tw["target"].tip_pos()
+                if tw["t"] >= self.TONGUE_HOLD:
+                    tw["phase"] = "back"
+                    tw["t"] = 0.0
+            else:
+                k = min(1.0, tw["t"] / self.TONGUE_BACK)
+                tw["tip"] = mouth.lerp(tw["tip"], k) if tw["t"] < self.TONGUE_BACK else mouth
+                if tw["t"] >= self.TONGUE_BACK:
+                    self.tongue = None
+        return landed
+
+    def draw(self, painter, cam, t, pads):
+        x, y = self.pos
+        h = self.heading
+        z = self.z
+        gz = ground_z(self.pos, pads, t)
+        s = 1.0 - self.z / 170.0
+        shadow = ellipse_pts(x + 6, y + 3, gz + 0.15, 34 * s, 25 * s, h)
+        flat_polygon(painter, cam, shadow, (16, 48, 40), bias=-4)
+        swing = math.sin(self.walk_phase) * 9 if self._moving and self.state == "ground" else 0.0
+        airborne = self.state == "air"
+        leg_c = (46, 88, 40)
+        for side in (-1, 1):
+            # 后腿股（大块肌肉，贴着身体）+ 脚蹼
+            hx, hy = rot2(-14, side * 22, h)
+            sphere(painter, cam, V3(x + hx, y + hy, z + 11), 14, (80, 134, 58), bias=0.4)
+            fx, fy = rot2(-30 + (swing if side > 0 else -swing) * 0.5, side * 38, h)
+            foot_z = gz + 0.15 if not airborne else self.z * 0.3 + 3
+            flat_polygon(painter, cam,
+                         ellipse_pts(x + fx, y + fy, foot_z, 11, 7, h), (66, 118, 50), bias=0.2)
+            # 前腿 + 三趾；bias 让腿根藏进身体下不穿模
+            sx2, sy2 = rot2(20, side * 15, h)
+            ffx, ffy = rot2(32 + (swing if side > 0 else -swing) * 0.4, side * 28, h)
+            shoulder = V3(x + sx2, y + sy2, z + 7)
+            foot = V3(x + ffx, y + ffy, foot_z)
+            segment(painter, cam, shoulder, foot, leg_c, 6, bias=2.5)
+            for k in range(3):
+                ta = h + side * 0.35 + (k - 1) * 0.32
+                toe = V3(x + ffx + math.cos(ta) * 7, y + ffy + math.sin(ta) * 7, foot_z)
+                segment(painter, cam, foot, toe, leg_c, 2, bias=2.5)
+        # 身体穹顶 + 斑点
+        flat_polygon(painter, cam, ellipse_pts(x, y, z + 8, 41, 30, h), (96, 156, 68), bias=0.2)
+        for (sx, sy), sr in self.skin_spots:                       # 迷彩斑点
+            ex, ey = rot2(sx, sy, h)
+            flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, z + 8.4, sr, sr * 0.72, h),
+                         (70, 122, 52), bias=0.3)
+        flat_polygon(painter, cam, ellipse_pts(x, y, z + 11, 30, 21, h), (110, 170, 80), bias=0.5)
+        for bx, by, br in ((-9, -10, 8), (7, 9, 9), (-22, 3, 6), (16, -6, 6)):
+            ex, ey = rot2(bx, by, h)
+            flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, z + 9.6, br, br * 0.7, h),
+                         (74, 126, 54), bias=0.4)
+        # 头 + 嘴线
+        hxp, hyp = rot2(32, 0, h)
+        flat_polygon(painter, cam, ellipse_pts(x + hxp, y + hyp, z + 12, 23, 17, h),
+                     (102, 162, 74), (58, 106, 46), 2, bias=0.6)
+        m1x, m1y = rot2(48, -11, h)
+        m2x, m2y = rot2(48, 11, h)
+        segment(painter, cam, V3(x + m1x, y + m1y, z + 10), V3(x + m2x, y + m2y, z + 10),
+                (44, 82, 38), 2)
+        # 金色眼睛：头顶前部一对鼓包，带深色竖瞳
+        for side in (-1, 1):
+            ex, ey = rot2(28, side * 9, h)
+            sphere(painter, cam, V3(x + ex, y + ey, z + 17), 8.0, (242, 206, 72), bias=0.5)
+            px, py = rot2(33, side * 8, h)
+            sphere(painter, cam, V3(x + px, y + py, z + 17.5), 2.8, (28, 24, 18), bias=0.7)
+        # 舌头（红色圆珠链，每颗独立深度）
+        if self.tongue and self.tongue["tip"]:
+            tip = self.tongue["tip"]
+            mouth = self.mouth_pos()
+            for i in range(7):
+                p = mouth.lerp(tip, i / 6)
+                sphere(painter, cam, p, 4.5 - 1.5 * (i / 6), (208, 62, 62))
+            sphere(painter, cam, tip, 6, (232, 120, 120))
+
+
+# ---------------------------------------------------------------- 果蝇
+class FlyBase:
+    BASE_SPEED = 85.0
+
+    def __init__(self, pos, seed):
+        self.pos = V2(pos)
+        self.heading = random.uniform(0, math.tau)
+        self.z = 16.0                  # 飞行高度（身体基准）
+        self.z_target = 16.0
+        self.wing_phase = random.uniform(0, math.tau)
+        self.leg_phase = random.uniform(0, math.tau)
+        self.alive = True
+        self.buzz_jitter = random.Random(seed).uniform(0.85, 1.15)
+        self.groom_t = 0.0             # 擦眼睛(梳洗)剩余时长
+        self.groom_cd = random.uniform(5.0, 9.0)
+        self.eating_now = False
+        self._speed = 0.0
+
+    def tip_pos(self):
+        """舌头瞄准点。"""
+        return V3(self.pos.x, self.pos.y, self.z + 3)
+
+    def move_body(self, dt, speed, turn):
+        self._speed = speed
+        self.heading += turn * dt
+        self.pos += V2(math.cos(self.heading), math.sin(self.heading)) * speed * dt
+        if not (-MARGIN_X < self.pos.x < MARGIN_X and -MARGIN_Y < self.pos.y < MARGIN_Y):
+            self.pos.x = clamp(self.pos.x, -MARGIN_X, MARGIN_X)
+            self.pos.y = clamp(self.pos.y, -MARGIN_Y, MARGIN_Y)
+            self.heading += math.pi
+        if speed > 1 and self.z < 8:
+            self.leg_phase += dt * speed / 9       # 步态相位随步速推进
+        if self.z > 8:
+            self.wing_phase += dt * 46 * math.tau  # 振翅相位
+        self.z += (self.z_target - self.z) * min(1.0, dt * 5)
+
+    def _update_groom(self, dt):
+        """梳洗周期：落地后每隔几秒用前足擦一次眼睛。"""
+        self.groom_cd -= dt
+        if self.groom_cd <= 0 and self.groom_t <= 0:
+            self.groom_t = 1.2
+            self.groom_cd = random.uniform(4.0, 8.0)
+        if self.groom_t > 0:
+            self.groom_t = max(0.0, self.groom_t - dt)
+
+    def _seg(self, painter, cam, a, b, color, w):
+        segment(painter, cam, a, b, color, w)
+
+    def draw(self, painter, cam, t, pads):
+        x, y = self.pos
+        h = self.heading
+        z = self.z                          # 身体基准高度
+        gz = ground_z(self.pos, pads, t)
+        flying = z > 8
+        sh = clamp(1.0 - z / 55.0, 0.25, 1.0)
+
+        # 影子贴地（不穿进荷叶：影子高度=地面高度）
+        shadow = ellipse_pts(x + 3 * sh, y + 2 * sh, gz + 0.15, 9 * sh, 5.5 * sh, h)
+        flat_polygon(painter, cam, shadow, (10, 34, 28), bias=-4)
+        # 六足: 髋→膝→足 三点两段, 各状态独立步态
+        legs = (
+            ((2.4, -1.6), (6.2, -3.8), (9.0, -5.6)),
+            ((0.2, -1.9), (2.4, -5.0), (3.0, -7.8)),
+            ((-2.4, -1.8), (-4.8, -4.8), (-7.4, -6.8)),
+            ((2.4, 1.6), (6.2, 3.8), (9.0, 5.6)),
+            ((0.2, 1.9), (2.4, 5.0), (3.0, 7.8)),
+            ((-2.4, 1.8), (-4.8, 4.8), (-7.4, 6.8)),
+        )
+        # 局部坐标 → 世界坐标(随身体朝向旋转)
+        c_, s_ = math.cos(h), math.sin(h)
+
+        def L(vx, vy, vz):
+            return V3(x + (vx * c_ - vy * s_), y + (vx * s_ + vy * c_), vz)
+
+        for i, (hip, knee, foot0) in enumerate(legs):
+            side = 1 if foot0[1] > 0 else -1
+            if flying:
+                jit = math.sin(t * 30 + i * 2.1) * 0.8
+                hp = L(hip[0] * 0.9, hip[1] * 0.9, z + 1.0)
+                kn = L(knee[0] * 0.8, knee[1] * 0.8, z + 0.2)
+                ft = L(foot0[0] - 3.5, foot0[1] * 0.7, z - 2.6 + jit)
+            elif mode_eat(self):
+                if i in (0, 3):                 # 前足搭在食饵上搓动, 辅助进食
+                    rub = math.sin(t * 16 + (0 if i == 0 else math.pi)) * 1.4
+                    hp = L(hip[0], hip[1], z + 1.0)
+                    kn = L(knee[0], knee[1], gz + 1.6)
+                    ft = L(foot0[0] + 1.5, foot0[1] * 0.45 + rub, gz + 0.6)
+                elif i in (1, 4):               # 中足撑在叶面
+                    hp = L(hip[0], hip[1], z + 1.0)
+                    kn = L(knee[0], knee[1], gz + 1.2)
+                    ft = L(foot0[0], foot0[1], gz + 0.3)
+                else:                           # 后足交替微踏
+                    s2 = math.sin(self.leg_phase * 6 + (0 if i == 2 else math.pi)) * 1.4
+                    hp = L(hip[0], hip[1], z + 1.0)
+                    kn = L(knee[0], knee[1], gz + 1.1)
+                    ft = L(foot0[0] + s2, foot0[1], gz + 0.3)
+            elif self.groom_t > 0:              # 前足抬到复眼上画圈擦洗
+                if i in (0, 3):
+                    ph = t * 13 + (0 if i == 0 else math.pi)
+                    hp = L(hip[0], hip[1], z + 1.4)
+                    kn = L(knee[0] * 0.9, knee[1] * 0.9, z + 2.6)
+                    ft = L(6.8 + math.cos(ph) * 1.6, side * 1.9 + math.sin(ph) * 1.1, z + 2.9)
+                elif i in (1, 4):
+                    hp = L(hip[0], hip[1], z + 1.0)
+                    kn = L(knee[0], knee[1], gz + 1.3)
+                    ft = L(foot0[0], foot0[1], gz + 0.3)
+                else:
+                    hp = L(hip[0], hip[1], z + 1.0)
+                    kn = L(knee[0], knee[1], gz + 1.2)
+                    ft = L(foot0[0], foot0[1], gz + 0.3)
+            else:                               # 三角步态行走
+                g = 0 if i in (0, 4, 2) else 1
+                stride = math.sin(self.leg_phase * 6 + g * math.pi) * 2.8
+                hp = L(hip[0], hip[1], z + 1.0)
+                kn = L(knee[0], knee[1], (z + 1.0 + gz) / 2 + 0.6)
+                ft = L(foot0[0] + stride, foot0[1], gz + 0.25)
+            self._seg(painter, cam, hp, kn, (178, 140, 92), 2)
+            self._seg(painter, cam, kn, ft, (150, 116, 74), 1)
+            sphere(painter, cam, ft, 0.7, (120, 88, 56))
+        # 身体: 参考真实果蝇——琥珀色前腹, 越往后颜色越深(环带), 橙棕胸, 砖红复眼
+        ab1 = V3(x + rot2(-3.0, 0, h)[0], y + rot2(-3.0, 0, h)[1], z + 1.0)
+        ab2 = V3(x + rot2(-5.0, 0, h)[0], y + rot2(-5.0, 0, h)[1], z + 0.9)
+        ab3 = V3(x + rot2(-6.7, 0, h)[0], y + rot2(-6.7, 0, h)[1], z + 0.8)
+        sphere(painter, cam, ab1, 3.0, (214, 172, 116), bias=0.5)
+        sphere(painter, cam, ab2, 2.7, (176, 132, 84), bias=0.55)
+        sphere(painter, cam, ab3, 2.2, (104, 66, 44), bias=0.6)
+        th = V3(x + rot2(0.8, 0, h)[0], y + rot2(0.8, 0, h)[1], z + 1.6)
+        sphere(painter, cam, th, 3.5, (206, 150, 92), bias=0.8)
+        hd = V3(x + rot2(5.8, 0, h)[0], y + rot2(5.8, 0, h)[1], z + 2.2)
+        sphere(painter, cam, hd, 2.4, (206, 156, 100), bias=1.1)
+        # 触角
+        for side in (-1, 1):
+            a1 = V3(x + rot2(7.4, side * 0.9, h)[0], y + rot2(7.4, side * 0.9, h)[1], z + 2.8)
+            a2 = V3(x + rot2(9.6, side * 2.0, h)[0], y + rot2(9.6, side * 2.0, h)[1], z + 3.0)
+            self._seg(painter, cam, a1, a2, (150, 110, 70), 1)
+        # 红色复眼一对(互相贴近成 bilobed 整体, 不会误读成两只虫)
+        for side in (-1, 1):
+            e = V3(x + rot2(6.2, side * 1.1, h)[0], y + rot2(6.2, side * 1.1, h)[1], z + 2.7)
+            sphere(painter, cam, e, 2.3, (226, 48, 36), bias=1.4)
+        # 口器(进食时伸向食饵)
+        if mode_eat(self):
+            p1 = V3(x + rot2(7.4, 0, h)[0], y + rot2(7.4, 0, h)[1], z + 1.6)
+            p2 = V3(x + rot2(11.2, 0, h)[0], y + rot2(11.2, 0, h)[1], gz + 0.8)
+            self._seg(painter, cam, p1, p2, (160, 118, 72), 2)
+            sphere(painter, cam, p2, 1.3, (150, 100, 62), bias=0.3)
+        # 双翅: 飞行展开振动(带翅脉), 落地收拢在背上
+        wing_c = (242, 238, 224)
+        if flying:
+            for side in (-1, 1):
+                flap = 0.5 * math.sin(self.wing_phase + (0 if side < 0 else math.pi))
+                wang = h + side * (2.15 + flap)
+                wx, wy = math.cos(wang), math.sin(wang)
+                bx, by = rot2(-2, side * 1.6, h)
+                pts = [V3(x + bx, y + by, z + 2.6),
+                       V3(x + bx + wx * 5, y + by + wy * 5, z + 5.2),
+                       V3(x + bx + wx * 13, y + by + wy * 13, z + 3.4),
+                       V3(x + bx + wx * 7 - wy * side * 3, y + by + wy * 7 + wx * side * 3, z + 2.2)]
+                flat_polygon(painter, cam, pts, wing_c, bias=0.3)
+                vein_a = V3(x + bx + wx * 3, y + by + wy * 3, z + 3.6)
+                vein_b = V3(x + bx + wx * 11, y + by + wy * 11, z + 2.8)
+                self._seg(painter, cam, vein_a, vein_b, (170, 195, 210), 1)
+        else:
+            # 收拢的翅: 贴在背上沿身体方向的窄翅面, 不再伸出身后形成"重影"
+            for side in (-1, 1):
+                bx, by = rot2(-1.0, side * 1.0, h)
+                mx, my = rot2(-4.5, side * 1.3, h)
+                tx, ty = rot2(-7.8, side * 0.9, h)
+                pts = [V3(x + bx, y + by, z + 2.2), V3(x + mx, y + my, z + 2.35),
+                       V3(x + tx, y + ty, z + 2.1), V3(x + tx - 0.8, y + ty - 0.8, z + 1.9)]
+                flat_polygon(painter, cam, pts, (222, 226, 216), bias=0.55, layer=4)
+
+
+def mode_eat(fly):
+    return fly.eating_now and not fly.groom_t > 0
+
+
+class ScriptedFly(FlyBase):
+    """脚本化 NPC：航点觅食 → 降落啃食 → 靠近青蛙 110 内拔腿就逃。没有神经元。"""
+
+    def __init__(self, pos, seed):
+        super().__init__(pos, seed)
+        self.state = "觅食"
+        self.food = None
+        self.flee_t = 0.0
+        self.eat_t = 0.0
+
+    def update(self, dt, frog, crumbs, t):
+        dfrog = self.pos.distance_to(frog.pos)
+        if self.state != "逃离" and dfrog < 110:
+            self.state = "逃离"
+            self.flee_t = 1.1
+            away = self.pos - frog.pos
+            self.heading = math.atan2(away.y, away.x) + random.uniform(-0.3, 0.3)
+            self.z_target = 19.0
+        if self.state == "逃离":
+            self.flee_t -= dt
+            self.move_body(dt, 240, random.uniform(-1, 1) * dt * 2)
+            if self.flee_t <= 0 or dfrog > 260:
+                self.state = "觅食"
+                self.food = None
+                self.z_target = 16.0
+        elif self.state == "进食":
+            self.eat_t -= dt
+            self.z_target = 3.4
+            self._update_groom(dt)
+            self.eating_now = self.groom_t <= 0        # 擦眼睛时前足腾不出空
+            if self.eating_now and self.food and self.food.amount > 0:
+                self.food.bite(dt)
+            if self.eat_t <= 0 or not self.food or self.food.amount <= 0:
+                self.state = "觅食"
+                self.food = None
+                self.eating_now = False
+                self.z_target = 16.0
+        else:
+            if self.food is None or self.food.amount <= 0:
+                alive = [c for c in crumbs if c.amount > 0.3]
+                self.food = min(alive, key=lambda c: c.pos().distance_to(self.pos)
+                                + c.crowd * 40) if alive else None
+            if self.food:
+                fp = self.food.pos()
+                d = fp.distance_to(self.pos)
+                self.heading += clamp(ang_diff(self.heading, math.atan2(fp.y - self.pos.y,
+                                                                        fp.x - self.pos.x)), -1, 1) * 2.6 * dt
+                self.move_body(dt, self.BASE_SPEED * self.buzz_jitter, 0)
+                if d < 9:
+                    self.state = "进食"
+                    self.eat_t = random.uniform(2.6, 3.6)
+            else:
+                self.heading += math.sin(t * 0.8 + self.wing_phase) * 0.8 * dt
+                self.move_body(dt, self.BASE_SPEED * 0.6, 0)
+        if self.state != "进食":
+            self.move_body(dt, 0, 0)   # 仅用于高度过渡
+
+    def state_name(self):
+        return self.state
+
+
+class BrainFly(FlyBase):
+    """唯一的"思考者"：脉冲神经网络驱动的果蝇个体（金色框标注）。
+
+    巨纤维逃逸反射比脚本 NPC 灵敏得多（170 就触发，脚本 110），
+    循气味趋向食饵，是否降落进食由歇息回路闸门决定。
+    """
+
+    def __init__(self, pos, seed):
+        super().__init__(pos, seed)
+        self.brain = FlyBrain(seed)
+        self.hunger = 0.6
+        self.rest_t = 0.0        # 歇息中没有进展(没得吃)的计时
+        self.rest_total = 0.0    # 本次歇息总时长
+
+    def _takeoff(self):
+        self.brain.resting = False
+        self.brain.escape_timer = 0.35
+        self.z_target = 21.0
+        self.rest_t = 0.0
+        self.rest_total = 0.0
+
+    @property
+    def resting(self):
+        return self.brain.resting
+
+    def update(self, dt, frog, crumbs, t):
+        dfrog = self.pos.distance_to(frog.pos)
+        alive_food = [c for c in crumbs if c.amount > 0.3]
+        food = min(alive_food, key=lambda c: c.pos().distance_to(self.pos)
+                   + c.crowd * 40) if alive_food else None
+        food_dist = food.pos().distance_to(self.pos) if food else 999.0
+        cmd = self.brain.step(dt, dist_frog=dfrog, frog_airborne=frog.state == "air",
+                              pad_dist=food_dist, t=t)
+        if cmd["gf_fired"]:
+            away = self.pos - frog.pos
+            self.heading = math.atan2(away.y, away.x) + random.uniform(-0.3, 0.3)
+
+        if self.brain.escape_timer > 0:
+            self.z_target = 21.0
+            self.eating_now = False
+            self.move_body(dt, self.BASE_SPEED * cmd["thrust"], random.uniform(-1, 1) * dt)
+        elif self.brain.resting:
+            self.z_target = 3.4
+            self.rest_t += dt
+            self.rest_total += dt
+            self._update_groom(dt)
+            self.eating_now = False
+            if food and food_dist < 26 and food.amount > 0:
+                # 落在食饵上: 平滑转身爬向碎屑(贴近后进入死区, 不再转向防止头尾翻转)
+                if food_dist > 8:
+                    target = math.atan2(food.pos().y - self.pos.y, food.pos().x - self.pos.x)
+                    self.heading = lerp_angle(self.heading, target, 1 - math.exp(-6 * dt))
+                    crawl = min(30.0, food_dist * 4 + 6)
+                else:
+                    crawl = 0.0
+                self.move_body(dt, crawl if self.groom_t <= 0 else 0.0, 0)
+                if food_dist < 10 and food.amount > 0 and self.groom_t <= 0:
+                    self.eating_now = True
+                    food.bite(dt)
+                    self.hunger = max(0.0, self.hunger - dt * 0.35)
+                    self.rest_t = 0.0
+                    if food.amount <= 0:
+                        self._takeoff()
+            else:
+                self.move_body(dt, 0, 0)
+            # 主动起飞：2.5 秒没吃到东西，或这顿歇满 12 秒
+            if self.rest_t > 2.5 or self.rest_total > 12.0:
+                self._takeoff()
+        else:
+            self.z_target = 16.0
+            braking = 1.0
+            if food and self.brain.escape_timer <= 0:
+                braking = 0.45 if food_dist < 45 else 1.0   # 接近食饵减速, 让歇息电位积累
+                k = clamp(ang_diff(self.heading,
+                                   math.atan2(food.pos().y - self.pos.y, food.pos().x - self.pos.x)), -1, 1)
+                self.heading += k * 1.6 * dt * (0.5 + self.hunger)    # 气味趋向
+            self.move_body(dt, self.BASE_SPEED * cmd["thrust"] * self.buzz_jitter * braking, cmd["turn"])
+        self.hunger = min(1.0, self.hunger + dt * 0.02)
+
+    def state_name(self):
+        return self.brain.state
+
+    def neurons(self):
+        return self.brain.neurons()
+
+
+# ---------------------------------------------------------------- 游戏
+class Game:
+    def __init__(self, headless=False):
+        self.headless = headless
+        self.autopilot = headless
+        self.screen = pygame.display.set_mode((W, H), pygame.SCALED | pygame.RESIZABLE)
+        pygame.display.set_caption("果蝇池塘 3D · 空格跳跃 / F 吐舌")
+        self.font_big = load_cjk_font(30, bold=True)
+        self.font = load_cjk_font(19)
+        self.font_small = load_cjk_font(14)
+        self.cam = Camera3D((-900, -880, 640), (80, 100, 0), focal=1050)
+        self.cam_target = V3(80, 100, 0)          # 注视点(左键拖动平移)
+        self.cam_yaw = math.radians(225)          # 机位方位角(右键左右拖动旋转)
+        self.cam_elev = math.radians(25)          # 仰角(右键上下拖动调整)
+        self.dist = 1526.0                        # 机位距离(滚轮缩放)
+        self._panning = False
+        self._rotating = False
+        self._down = None                         # [x, y, 累计位移]
+        self.painter = Painter()
+        self.vignette = scenery.build_vignette(W, H)
+        self.bank_props = scenery.make_bank_props()
+        self.pads = scenery.make_pads()
+        self.crumbs = [scenery.FoodCrumb(p) for p in self.pads]
+        self.ripples = scenery.Ripples()
+        self.duckweed = scenery.make_duckweed()
+        self.sounds = SoundKit(enabled=not headless)
+        self.frog = Frog((0, -120))
+        self.flies = self._initial_flies()
+        self.particles = []
+        self.popups = []
+        self.show_brain = False
+        self.t = 0.0
+        self.spawn_timer = 0.0
+        self.ambient_timer = 0.0
+        self.aim_target = None
+        self.shake = 0.0
+        self.fullscreen = False
+
+    def _initial_flies(self):
+        flies = []
+        for i in range(TARGET_FLIES - 1):
+            flies.append(ScriptedFly((random.uniform(-450, 450), random.uniform(-180, 260)), seed=i))
+        flies.append(BrainFly((random.uniform(-260, 260), random.uniform(-80, 200)), seed=99))
+        return flies
+
+    def brain_fly(self):
+        for f in self.flies:
+            if isinstance(f, BrainFly):
+                return f
+        return None
+
+    def _spawn_fly(self):
+        edge = random.randrange(4)
+        if edge == 0:
+            pos = V2(random.uniform(-MARGIN_X, MARGIN_X), -MARGIN_Y + 14)
+        elif edge == 1:
+            pos = V2(random.uniform(-MARGIN_X, MARGIN_X), MARGIN_Y - 14)
+        elif edge == 2:
+            pos = V2(-MARGIN_X + 14, random.uniform(-MARGIN_Y, MARGIN_Y))
+        else:
+            pos = V2(MARGIN_X - 14, random.uniform(-MARGIN_Y, MARGIN_Y))
+        if self.brain_fly() is None:
+            self.flies.append(BrainFly(pos, seed=random.randrange(10 ** 6)))
+        else:
+            self.flies.append(ScriptedFly(pos, seed=random.randrange(10 ** 6)))
+
+    # ---------- 更新 ----------
+    def simulate(self, dt, move, jump, tongue_cmd):
+        self.t += dt
+        if self.autopilot:
+            move, jump, tongue_cmd = self._autopilot()
+        # 瞄准：朝向锥内最近的目标（瞄准圈 + 吐舌共用）
+        self.aim_target = None
+        best = 1e9
+        for f in self.flies:
+            d = f.pos.distance_to(self.frog.pos)
+            ang = abs(ang_diff(self.frog.heading,
+                               math.atan2(f.pos.y - self.frog.pos.y, f.pos.x - self.frog.pos.x)))
+            if d < TONGUE_RANGE and ang < TONGUE_CONE and d < best:
+                best, self.aim_target = d, f
+        # 食饵拥挤度: 每颗食饵附近已有多少果蝇(供选食时避开拥挤)
+        for c in self.crumbs:
+            c.crowd = sum(1 for f in self.flies if f.pos.distance_to(c.pos()) < 16)
+        landed = self.frog.update(dt, move, jump, tongue_cmd, self.aim_target,
+                                  self.ripples, self.sounds)
+        if landed:
+            self.shake = 0.32
+            self.try_eat(self.frog.pos, EAT_RADIUS, "压杀!")
+        tip = self.frog.tongue["tip"] if self.frog.tongue else None
+        if tip and self.frog.tongue["phase"] in ("out", "hold"):
+            self.try_eat_tip(tip)
+        for f in self.flies:
+            f.update(dt, self.frog, self.crumbs, self.t)
+        self.flies = [f for f in self.flies if f.alive]
+        self.spawn_timer += dt
+        if self.spawn_timer > 5.0 and len(self.flies) < TARGET_FLIES:
+            self.spawn_timer = 0.0
+            self._spawn_fly()
+        for c in self.crumbs:
+            if c.amount <= 0:
+                c.timer -= dt
+                if c.timer <= 0:
+                    c.respawn()
+        self.ambient_timer -= dt
+        if self.ambient_timer <= 0:
+            self.ambient_timer = random.uniform(0.7, 2.2)
+            self.ripples.add(V2(random.uniform(-500, 500), random.uniform(-260, 260)), 0.25)
+        self.ripples.update(dt)
+        for p in self.particles:
+            p["pos"] += p["vel"] * dt
+            p["vel"].z -= 320 * dt
+            p["life"] -= dt * 1.8
+        self.particles = [p for p in self.particles if p["life"] > 0]
+        for p in self.popups:
+            p["pos"].z += 30 * dt
+            p["life"] -= dt
+        self.popups = [p for p in self.popups if p["life"] > 0]
+        buzz = max((1 - f.pos.distance_to(self.frog.pos) / 430 for f in self.flies if f.z > 8),
+                   default=0.0)
+        self.sounds.set_buzz(max(0.0, min(1.0, buzz)) * 0.55)
+        self.shake = max(0.0, self.shake - dt)
+
+    def try_eat(self, point, radius, label):
+        for f in list(self.flies):
+            if V2(point.x, point.y).distance_to(f.pos) <= radius:
+                self._consume(f, label)
+
+    def try_eat_tip(self, tip):
+        for f in list(self.flies):
+            if f.tip_pos().distance_to(tip) <= TONGUE_CATCH:
+                self._consume(f, "舌头!")
+
+    def _consume(self, f, label):
+        f.alive = False
+        self.frog.eaten += 1
+        self.sounds.crunch_()
+        self.ripples.add(f.pos, 0.7)
+        self.popups.append({"pos": V3(f.pos.x, f.pos.y, f.z + 8), "text": f"+1 {label}", "life": 1.1})
+        for _ in range(12):
+            a = random.uniform(0, math.tau)
+            self.particles.append({
+                "pos": V3(f.pos.x, f.pos.y, f.z + 4),
+                "vel": V3(math.cos(a) * random.uniform(20, 90),
+                          math.sin(a) * random.uniform(20, 90), random.uniform(40, 140)),
+                "life": random.uniform(0.4, 0.8),
+                "color": random.choice(((48, 40, 36), (96, 60, 40), (192, 36, 36)))})
+        self.flies = [g for g in self.flies if g.alive]
+
+    def _autopilot(self):
+        """冒烟测试自动驾驶：走向目标，射程内吐舌，预判落点跳跃。"""
+        move, jump, tongue = V2(0), False, False
+        if self.flies:
+            target = min(self.flies, key=lambda f: f.pos.distance_to(self.frog.pos))
+            d = target.pos.distance_to(self.frog.pos)
+            dd = target.pos - self.frog.pos
+            if d > 70 and dd.length_squared() > 1:
+                move = dd.normalize()
+            if d < TONGUE_RANGE - 5 and self.frog.cooldown <= 0 and not self.frog.tongue:
+                tongue = True
+            elif self.frog.state == "ground" and 150 < d:
+                land = self.frog.pos + V2(math.cos(self.frog.heading),
+                                          math.sin(self.frog.heading)) * Frog.JUMP_LEN
+                if min((f.pos.distance_to(land) for f in self.flies), default=1e9) < 55:
+                    jump = True
+        return move, jump, tongue
+
+    # ---------- 输入 ----------
+    def handle_event(self, e):
+        """处理单个事件, 返回 (tongue_cmd, quit_req)。"""
+        tongue_cmd = False
+        quit_req = False
+        if e.type == pygame.QUIT:
+            quit_req = True
+        elif e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE:
+            quit_req = True
+        elif e.type == pygame.KEYDOWN and e.key == pygame.K_b:
+            self.show_brain = not self.show_brain
+        elif e.type == pygame.KEYDOWN and e.key == pygame.K_m:
+            self.sounds.toggle_mute()
+        elif e.type == pygame.KEYDOWN and e.key == pygame.K_F11:
+            self.fullscreen = not self.fullscreen
+            self._apply_display()
+        elif e.type == pygame.KEYDOWN and e.key == pygame.K_f:
+            tongue_cmd = True
+        elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            self._panning = True
+            self._down = [e.pos[0], e.pos[1], 0]
+        elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 3:
+            self._rotating = True
+        elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
+            # 原地单击(几乎没有拖动)=吐舌; 拖动过=只是平移视角
+            if self._down and self._down[2] < 6:
+                tongue_cmd = True
+            self._panning = False
+            self._down = None
+        elif e.type == pygame.MOUSEBUTTONUP and e.button == 3:
+            self._rotating = False
+        elif e.type == pygame.MOUSEMOTION:
+            if self._rotating:
+                # 右键拖动: 水平转方位, 垂直调俯仰
+                self.cam_yaw += e.rel[0] * 0.005
+                self.cam_elev = clamp(self.cam_elev + e.rel[1] * 0.004,
+                                      math.radians(18), math.radians(62))
+            elif self._panning and self._down:
+                # 左键拖动: 抓取式——图跟着手走(往哪拖画面就往哪滑)
+                rel = (e.pos[0] - self._down[0], e.pos[1] - self._down[1])
+                self._down[0], self._down[1] = e.pos[0], e.pos[1]
+                self._down[2] += abs(rel[0]) + abs(rel[1])
+                s = self.dist / 900.0                  # 平移速度随缩放自适应
+                fx, fy = -math.cos(self.cam_yaw), -math.sin(self.cam_yaw)   # 镜头前方(屏幕上方)
+                rx, ry = -math.sin(self.cam_yaw), math.cos(self.cam_yaw)   # 镜头右侧
+                self.cam_target.x += (fx * rel[1] - rx * rel[0]) * s
+                self.cam_target.y += (fy * rel[1] - ry * rel[0]) * s
+                self.cam_target.x = clamp(self.cam_target.x, -scenery.POND_W2, scenery.POND_W2)
+                self.cam_target.y = clamp(self.cam_target.y, -scenery.POND_H2, scenery.POND_H2)
+        elif e.type == pygame.MOUSEWHEEL:
+            self.dist = clamp(self.dist * (0.9 ** e.y), 420, 3200)   # 滚轮缩放(草地已铺满, 可贴近看果蝇动作)
+        return tongue_cmd, quit_req
+
+    # ---------- 绘制 ----------
+    def draw(self):
+        surf = self.screen
+        # 机位 = 注视点 + 方位角/仰角/距离 构成的球坐标偏移
+        ce, se = math.cos(self.cam_elev), math.sin(self.cam_elev)
+        ca, sa = math.cos(self.cam_yaw), math.sin(self.cam_yaw)
+        eye = self.cam_target + V3(self.dist * ce * ca, self.dist * ce * sa, self.dist * se)
+        if self.shake > 0:
+            eye += V3(random.uniform(-1, 1) * self.shake * 14,
+                      random.uniform(-1, 1) * self.shake * 10,
+                      random.uniform(-1, 1) * self.shake * 8)
+        self.cam.set_view(eye, self.cam_target)
+        # 天空：地平线以上的雾霾渐变
+        hor = self.cam.project(self.cam.pos + self.cam.fwd * 3000)
+        if hor:
+            hy = clamp(int(hor[1]), 0, H)
+            bands = 18
+            for i in range(bands):
+                f = i / (bands - 1)
+                c = (int(150 + 58 * f), int(166 + 44 * f), int(156 + 42 * f))
+                y0 = int(hy * i / bands)
+                y1 = int(hy * (i + 1) / bands) + 1
+                pygame.draw.rect(surf, c, (0, y0, W, y1 - y0))
+            pygame.draw.rect(surf, (9, 41, 39), (0, hy, W, H - hy))
+        painter, cam = self.painter, self.cam
+        scenery.draw_pond(painter, cam, self.t)
+        scenery.draw_banks(painter, cam, self.t, self.bank_props)
+        self.ripples.draw(painter, cam)
+        scenery.draw_duckweed(painter, cam, self.t, self.duckweed)
+        for pad in self.pads:
+            pad.draw(painter, cam, self.t)
+        for c in self.crumbs:
+            c.draw(painter, cam, self.t)
+        bf = self.brain_fly()
+        for f in self.flies:
+            if f is not bf:
+                f.draw(painter, cam, self.t, self.pads)
+        if bf:
+            bf.draw(painter, cam, self.t, self.pads)
+        self.frog.draw(painter, cam, self.t, self.pads)
+        for p in self.particles:
+            sphere(painter, cam, p["pos"], 1.6 * p["life"] + 0.6, p["color"])
+        painter.flush(surf)
+        # 瞄准圈（白色圆环，套在锥内最近目标上）
+        if self.aim_target:
+            sp = cam.project(V3(self.aim_target.pos.x, self.aim_target.pos.y, self.aim_target.z + 2))
+            if sp:
+                r = clamp(cam.focal * 12 / sp[2], 14, 80)
+                pygame.draw.circle(surf, (246, 243, 228), (int(sp[0]), int(sp[1])), int(r), 3)
+        if bf:
+            self._draw_brackets(surf, bf)
+        for p in self.popups:
+            sp = cam.project(p["pos"])
+            if sp:
+                label = self.font.render(p["text"], True, (255, 236, 180))
+                label.set_alpha(max(0, min(255, int(p["life"] * 260))))
+                surf.blit(label, label.get_rect(midbottom=(int(sp[0]), int(sp[1]))))
+        surf.blit(self.vignette, (0, 0))
+        self._draw_hud()
+
+    def _draw_brackets(self, surf, bf):
+        sp = self.cam.project(V3(bf.pos.x, bf.pos.y, bf.z + 6))
+        if sp is None:
+            return
+        sx, sy, depth = sp
+        r = clamp(self.cam.focal * 22 / depth, 20, 130) * (1 + 0.05 * math.sin(self.t * 5))
+        corner = r * 0.45
+        for cx, cyy, dx, dy in ((sx - r, sy - r, 1, 1), (sx + r, sy - r, -1, 1),
+                                (sx - r, sy + r, 1, -1), (sx + r, sy + r, -1, -1)):
+            pygame.draw.line(surf, GOLD, (cx, cyy), (cx + dx * corner, cyy), 3)
+            pygame.draw.line(surf, GOLD, (cx, cyy), (cx, cyy + dy * corner), 3)
+        st = "梳洗" if bf.groom_t > 0 else bf.state_name()
+        label = self.font_small.render(f"神经元个体 · {st}", True, GOLD)
+        surf.blit(label, label.get_rect(midbottom=(int(sx), int(sy - r - 4))))
+
+    def _draw_hud(self):
+        surf = self.screen
+        pygame.draw.rect(surf, (6, 24, 20), (0, 0, W, 66), border_bottom_left_radius=14,
+                         border_bottom_right_radius=14)
+        title = self.font_big.render(f"吃掉 {self.frog.eaten} 只果蝇", True, (240, 248, 238))
+        surf.blit(title, (18, 8))
+        cd = self.frog.cooldown
+        cd_txt = "舌头就绪" if cd <= 0 else f"舌头 {cd:.1f}s"
+        info = self.font.render(
+            f"存活 {len(self.flies)}/{TARGET_FLIES}（8 脚本 + 1 神经元） · 跳跃 {self.frog.hops} · "
+            f"{cd_txt} · 神经面板{'开' if self.show_brain else '关'}(B)", True, (168, 210, 190))
+        surf.blit(info, (20, 42))
+        hint = self.font.render("方向键/WASD 游动 · 空格 跳跃 · 单击/F 吐舌 · 左键拖平移 · 右键拖旋转 · 滚轮缩放 · B 面板",
+                                True, (205, 226, 210))
+        surf.blit(hint, hint.get_rect(midbottom=(W / 2, H - 14)))
+        if self.show_brain:
+            bf = self.brain_fly()
+            if bf:
+                panel = pygame.Rect(1000, 76, 264, 238)
+                pygame.draw.rect(surf, (20, 34, 26), panel, border_radius=10)
+                pygame.draw.rect(surf, GOLD, panel, 2, border_radius=10)
+                st = "梳洗" if bf.groom_t > 0 else bf.state_name()
+                title = self.font_small.render(f"神经元个体 · {st}", True, GOLD)
+                surf.blit(title, (panel.x + 12, panel.y + 8))
+                for i, (name, act, fired) in enumerate(bf.neurons()):
+                    yy = panel.y + 34 + i * 22
+                    lab = self.font_small.render(name, True, (200, 224, 205))
+                    surf.blit(lab, (panel.x + 12, yy))
+                    pygame.draw.rect(surf, (40, 58, 48), (panel.x + 70, yy, 150, 12), border_radius=3)
+                    color = (255, 90, 70) if fired else (120, 220, 160)
+                    pygame.draw.rect(surf, color, (panel.x + 70, yy, max(2, int(150 * act)), 12),
+                                     border_radius=3)
+                notes = [
+                    "GF 巨纤维·逃逸: 蛙近175触发",
+                    "CX 中央复合体·巡航: 左右竞争",
+                    "REST 歇息: 悬停食饵→降落进食",
+                    "超阈值(-52mV)发放; 条=距发放",
+                    "tau: GF.05 CX.25 REST.6秒",
+                ]
+                ny = panel.y + 130
+                pygame.draw.line(surf, (60, 84, 66), (panel.x + 12, ny - 8),
+                                 (panel.x + panel.w - 12, ny - 8), 1)
+                for i, s in enumerate(notes):
+                    note = self.font_small.render(s, True, (186, 208, 192))
+                    surf.blit(note, (panel.x + 12, ny + i * 17))
+
+    # ---------- 主循环 ----------
+    def _apply_display(self):
+        """窗口模式与全屏之间切换；SCALED 保证 1280x800 画面等比铺满。"""
+        flags = pygame.SCALED | pygame.FULLSCREEN if self.fullscreen \
+            else pygame.SCALED | pygame.RESIZABLE
+        self.screen = pygame.display.set_mode((W, H), flags)
+
+    def run(self):
+        clock = pygame.time.Clock()
+        running = True
+        while running:
+            dt = min(clock.tick(FPS) / 1000.0, 1 / 20)
+            tongue_cmd = False
+            quit_req = False
+            for e in pygame.event.get():
+                tongue_cmd, quit_req = self.handle_event(e)
+                if quit_req:
+                    running = False
+            keys = pygame.key.get_pressed()
+            ix = (keys[pygame.K_RIGHT] + keys[pygame.K_d]
+                  - keys[pygame.K_LEFT] - keys[pygame.K_a])
+            iy = (keys[pygame.K_UP] + keys[pygame.K_w]
+                  - keys[pygame.K_DOWN] - keys[pygame.K_s])
+            # 屏幕方向 → 世界方向（固定镜头）：按上=往画面深处游
+            ff = V2(self.cam.fwd.x, self.cam.fwd.y)
+            if ff.length_squared() < 1e-6:
+                ff = V2(0, 1)
+            ff.normalize_ip()
+            fr = V2(ff.y, -ff.x)                     # 镜头水平右方向
+            move = ff * iy + fr * ix
+            if move.length_squared() > 1:
+                move = move.normalize()
+            self.simulate(dt, move, keys[pygame.K_SPACE], tongue_cmd)
+            self.draw()
+            pygame.display.flip()
+        pygame.quit()
+
+
+def selftest(frames=1800):
+    """无头冒烟测试：自动驾驶必须能用舌头/跳跃吃到虫，神经元果蝇必须触发过逃逸。"""
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+    os.environ["SDL_AUDIODRIVER"] = "dummy"
+    pygame.init()
+    g = Game(headless=True)
+    gf_events = 0
+    for i in range(frames):
+        g.simulate(1 / 60, V2(0), False, False)
+        bf = g.brain_fly()
+        if bf and bf.brain.gf_count:
+            gf_events = max(gf_events, bf.brain.gf_count)
+        if g.frog.eaten >= 3 and i > 300:
+            break
+    eaten, hops, alive = g.frog.eaten, g.frog.hops, len(g.flies)
+    pygame.quit()
+    print(f"[selftest] 吃掉={eaten} 跳跃={hops} 存活={alive} "
+          f"神经元果蝇GF逃逸反射={gf_events}次")
+    assert eaten >= 1, "自动驾驶没吃到虫"
+    print("[selftest] PASS ✓")
+
+
+if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        selftest()
+    else:
+        pygame.init()
+        Game().run()

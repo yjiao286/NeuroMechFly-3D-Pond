@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 虚拟环境 / Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+
+# 运行时产物 / Runtime artifacts
+real_fly.png
+*.log
+
+# 工具状态 / Tooling state
+.mimosa/
+
+# 编辑器与系统 / Editors & OS
+.DS_Store
+.idea/
+.vscode/

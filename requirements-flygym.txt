@@ -1,0 +1,3 @@
+# 可选：EPFL NeuroMechFly 真实果蝇神经力学模型（Python 3.12 以上）
+# Optional: EPFL NeuroMechFly, the real fruit-fly neuromechanical model (Python 3.12+)
+flygym==2.1.0
