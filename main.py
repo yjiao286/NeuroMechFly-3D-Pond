@@ -191,49 +191,53 @@ class Frog:
                   self.z + lz if lz is not None else self.z)
 
     def _hind_leg(self, painter, cam, side, gz, swing, airborne, skin, dark):
-        """后腿：股 → 胫 → 跗，折成青蛙特有的 Z 形，末端是四趾蹼足。"""
-        knee_out = -0.9 * swing * side
-        hip = self._local(-8, side * 15, 9.5)
+        """后腿：股 → 胫 → 跗，折成青蛙特有的 Z 形并收在身体两侧，末端是四趾蹼足。
+
+        静止时是青蛙的坐姿——膝略微顶出身体轮廓, 长脚掌贴着身体侧面向前收；
+        游动/跳跃时腿才蹬开(swing 驱动)。"""
+        kick = swing / 9.0 if not airborne else 1.0      # -1 ~ 1
+        hip = self._local(-8, side * 13, 9.5)
         if airborne:
-            knee = self._local(-38, side * 24, 8.0)
-            ankle = self._local(-18, side * 33, 6.5)
-            toe = self._local(12, side * 30, 6.0)
+            knee = self._local(-29, side * 17, 8.0)
+            ankle = self._local(-15, side * 23, 7.0)
+            toe = self._local(5, side * 21, 6.5)
         else:
-            knee = self._local(-31 + knee_out, side * 34, 6.5)
-            ankle = self._local(-5 + swing * 0.6, side * 40, gz - self.z + 2.0)
-            toe = self._local(17 + swing * 0.9, side * 35, gz - self.z + 1.0)
+            knee = self._local(-20 - 3.0 * kick, side * 23 + 3.0 * abs(kick), 6.5)
+            ankle = self._local(0 + 4.0 * kick, side * 28 + 2.5 * abs(kick),
+                                gz - self.z + 2.0)
+            toe = self._local(13 + 3.0 * kick, side * 26, gz - self.z + 1.2)
         # 股部：贴在大腿上的扁平肌肉块(椭圆), 比一根粗筒自然得多
         femur_ang = math.atan2(knee.y - hip.y, knee.x - hip.x)
         thigh = hip.lerp(knee, 0.48)
-        blob(painter, cam, thigh.x, thigh.y, hip.z - 4.0, 15.5, 9.5, 9.0,
+        blob(painter, cam, thigh.x, thigh.y, hip.z - 4.0, 13.0, 8.2, 8.5,
              mix(skin, dark, 0.16), heading=femur_ang, layers=9, taper=0.40, bias=0.55)
-        limb(painter, cam, knee, ankle, 6.4, skin, bias=0.3, taper=0.58)
-        limb(painter, cam, ankle, toe, 5.0, mix(skin, dark, 0.18), bias=0.2, taper=0.6)
+        limb(painter, cam, knee, ankle, 5.6, skin, bias=0.3, taper=0.58)
+        limb(painter, cam, ankle, toe, 4.4, mix(skin, dark, 0.18), bias=0.2, taper=0.6)
         for k in range(4):                                  # 蹼趾：从跗端向前扇开
             ta = self.heading + side * (0.52 - k * 0.34)
-            tip = V3(toe.x + math.cos(ta) * 15, toe.y + math.sin(ta) * 15, toe.z)
-            limb(painter, cam, toe, tip, 3.1, mix(skin, dark, 0.28), bias=0.1, taper=0.5)
+            tip = V3(toe.x + math.cos(ta) * 9, toe.y + math.sin(ta) * 9, toe.z)
+            limb(painter, cam, toe, tip, 2.8, mix(skin, dark, 0.28), bias=0.1, taper=0.5)
         web = [toe]                                         # 趾间蹼：薄扇形膜, 让后足读作"桨"
         for k in (0, 3):
             ta = self.heading + side * (0.52 - k * 0.34)
-            web.append(V3(toe.x + math.cos(ta) * 13.0, toe.y + math.sin(ta) * 13.0, toe.z - 0.2))
+            web.append(V3(toe.x + math.cos(ta) * 7.8, toe.y + math.sin(ta) * 7.8, toe.z - 0.2))
         flat_polygon(painter, cam, web, mix(skin, dark, 0.5), bias=0.05)
 
     def _front_leg(self, painter, cam, side, gz, swing, airborne, skin, dark):
         """前腿：肩 → 肘 → 腕，三趾。"""
         if airborne:
-            elbow = self._local(30, side * 26, 5.0)
-            wrist = self._local(42, side * 18, 3.0)
+            elbow = self._local(26, side * 21, 5.0)
+            wrist = self._local(34, side * 15, 3.0)
         else:
-            elbow = self._local(28, side * 22, 3.0)
-            wrist = self._local(42 + swing * 0.5 * side, side * 15, gz - self.z + 1.0)
-        shoulder = self._local(19, side * 13, 7.5)
-        limb(painter, cam, shoulder, elbow, 6.2, mix(skin, dark, 0.3), bias=0.4)
-        limb(painter, cam, elbow, wrist, 4.6, skin, bias=0.2)
+            elbow = self._local(24, side * 18, 3.0)
+            wrist = self._local(35 + swing * 0.5 * side, side * 13, gz - self.z + 1.0)
+        shoulder = self._local(17, side * 12, 7.5)
+        limb(painter, cam, shoulder, elbow, 5.6, mix(skin, dark, 0.3), bias=0.4)
+        limb(painter, cam, elbow, wrist, 4.2, skin, bias=0.2)
         for k in range(3):
             ta = self.heading + side * (0.42 - k * 0.42)
-            tip = V3(wrist.x + math.cos(ta) * 9, wrist.y + math.sin(ta) * 9, wrist.z)
-            limb(painter, cam, wrist, tip, 2.7, mix(skin, dark, 0.25), bias=0.1, taper=0.5)
+            tip = V3(wrist.x + math.cos(ta) * 7, wrist.y + math.sin(ta) * 7, wrist.z)
+            limb(painter, cam, wrist, tip, 2.4, mix(skin, dark, 0.25), bias=0.1, taper=0.5)
 
     def draw(self, painter, cam, t, pads):
         x, y = self.pos
@@ -420,42 +424,49 @@ class FlyBase:
                 hp = L(hip[0], hip[1], z + 1.0)
                 kn = L(knee[0], knee[1], (z + 1.0 + gz) / 2 + 0.6)
                 ft = L(foot0[0] + stride, foot0[1], gz + 0.25)
-            self._seg(painter, cam, hp, kn, (178, 140, 92), 2)
-            self._seg(painter, cam, kn, ft, (150, 116, 74), 1)
-            sphere(painter, cam, ft, 0.7, (120, 88, 56))
-        # 身体: 参考真实果蝇——琥珀色前腹, 越往后颜色越深(环带), 橙棕胸, 砖红复眼
-        ab1 = V3(x + rot2(-3.0, 0, h)[0], y + rot2(-3.0, 0, h)[1], z + 1.0)
-        ab2 = V3(x + rot2(-5.0, 0, h)[0], y + rot2(-5.0, 0, h)[1], z + 0.9)
-        ab3 = V3(x + rot2(-6.7, 0, h)[0], y + rot2(-6.7, 0, h)[1], z + 0.8)
-        sphere(painter, cam, ab1, 3.0, (214, 172, 116), bias=0.5)
-        sphere(painter, cam, ab2, 2.7, (176, 132, 84), bias=0.55)
-        sphere(painter, cam, ab3, 2.2, (104, 66, 44), bias=0.6)
-        th = V3(x + rot2(0.8, 0, h)[0], y + rot2(0.8, 0, h)[1], z + 1.6)
-        sphere(painter, cam, th, 3.6, (212, 156, 96), bias=0.8)
-        # 胸部刚毛：真实果蝇最有辨识度的特征之一
-        for k in range(6):
-            ba = h + math.pi / 2 + (k - 2.5) * 0.42
-            tilt = 0.4 + 0.25 * abs(k - 2.5) / 2.5
-            b0 = V3(x + rot2(0.6 + (k % 3) * 0.7, (k - 2.5) * 0.55, h)[0],
-                    y + rot2(0.6 + (k % 3) * 0.7, (k - 2.5) * 0.55, h)[1], z + 3.4)
-            b1 = V3(b0.x + math.cos(ba) * 1.5, b0.y + math.sin(ba) * 1.5,
-                    z + 3.4 + 1.9 * tilt)
-            segment(painter, cam, b0, b1, (92, 62, 40), 1, bias=0.5)
+            # 股→胫→跗三段锥形, 关节用亮色补圆(不再是一颗颗球)
+            limb(painter, cam, hp, kn, 0.80, (176, 138, 92), taper=0.72)
+            limb(painter, cam, kn, ft, 0.52, (154, 118, 76), taper=0.55)
+        # 身体: 参考真实果蝇——5 节琥珀色腹部环带(向后变细变深) + 驼背状胸部 + 小盾片
+        for k, (ax, rr, col) in enumerate(((-2.2, 2.9, (224, 184, 128)),
+                                           (-4.1, 2.75, (210, 166, 110)),
+                                           (-5.9, 2.5, (188, 140, 90)),
+                                           (-7.4, 2.1, (152, 104, 66)),
+                                           (-8.6, 1.6, (114, 72, 46)))):
+            ab = V3(x + rot2(ax, 0, h)[0], y + rot2(ax, 0, h)[1], z + 1.25 - 0.06 * k)
+            sphere(painter, cam, ab, rr, col, bias=0.5 + 0.02 * k, sheen=0.75)
+        th = V3(x + rot2(0.7, 0, h)[0], y + rot2(0.7, 0, h)[1], z + 1.9)
+        sphere(painter, cam, th, 3.5, (208, 152, 94), bias=0.8, sheen=0.7)
+        sc = V3(x + rot2(-1.5, 0, h)[0], y + rot2(-1.5, 0, h)[1], z + 2.3)
+        sphere(painter, cam, sc, 2.3, (178, 122, 76), bias=0.85, sheen=0.6)
+        # 刚毛：胸部两列背中刚毛 + 头顶两对(真实果蝇最一眼可辨的特征)
+        for k in range(8):
+            row, col_i = divmod(k, 4)
+            ba = h + math.pi / 2 + (col_i - 1.5) * 0.5
+            tilt = 0.5 + 0.3 * (1 - abs(col_i - 1.5) / 1.5)
+            b0 = V3(x + rot2(-0.6 + 0.9 * col_i, (row - 0.5) * 1.5, h)[0],
+                    y + rot2(-0.6 + 0.9 * col_i, (row - 0.5) * 1.5, h)[1], z + 3.3)
+            b1 = V3(b0.x + math.cos(ba) * 1.2 * (row * 2 - 1),
+                    b0.y + math.sin(ba) * 1.2 * (row * 2 - 1), z + 3.3 + 1.7 * tilt)
+            segment(painter, cam, b0, b1, (88, 58, 38), 1, bias=0.5)
         # 平衡棒（后翅退化成的陀螺仪器官，飞行平衡用）
         for side in (-1, 1):
             hp = V3(x + rot2(-2.6, side * 2.4, h)[0], y + rot2(-2.6, side * 2.4, h)[1], z + 1.4)
             sphere(painter, cam, hp, 0.9, (232, 206, 122), bias=0.5)
-        hd = V3(x + rot2(5.8, 0, h)[0], y + rot2(5.8, 0, h)[1], z + 2.2)
-        sphere(painter, cam, hd, 2.4, (206, 156, 100), bias=1.1)
+        hd = V3(x + rot2(5.9, 0, h)[0], y + rot2(5.9, 0, h)[1], z + 2.3)
+        sphere(painter, cam, hd, 2.5, (208, 158, 102), bias=1.1, sheen=0.7)
         # 触角
         for side in (-1, 1):
-            a1 = V3(x + rot2(7.4, side * 0.9, h)[0], y + rot2(7.4, side * 0.9, h)[1], z + 2.8)
-            a2 = V3(x + rot2(9.6, side * 2.0, h)[0], y + rot2(9.6, side * 2.0, h)[1], z + 3.0)
-            self._seg(painter, cam, a1, a2, (150, 110, 70), 1)
-        # 红色复眼一对(互相贴近成 bilobed 整体, 不会误读成两只虫)
+            a1 = V3(x + rot2(7.5, side * 0.9, h)[0], y + rot2(7.5, side * 0.9, h)[1], z + 3.0)
+            a2 = V3(x + rot2(9.1, side * 1.7, h)[0], y + rot2(9.1, side * 1.7, h)[1], z + 3.3)
+            limb(painter, cam, a1, a2, 0.5, (150, 110, 70), bias=-0.2, taper=0.7)
+        # 喙/口器：平时也收在头下(果蝇一直带着口器, 进食时才伸出去)
+        pb = V3(x + rot2(7.3, 0, h)[0], y + rot2(7.3, 0, h)[1], z + 1.1)
+        sphere(painter, cam, pb, 1.0, (150, 100, 62), bias=1.2, sheen=0.4)
+        # 砖红复眼一对：几乎占满头部, 互相贴近成 bilobed 整体(不会误读成两只虫)
         for side in (-1, 1):
-            e = V3(x + rot2(6.2, side * 1.1, h)[0], y + rot2(6.2, side * 1.1, h)[1], z + 2.7)
-            sphere(painter, cam, e, 2.3, (226, 48, 36), bias=1.4)
+            e = V3(x + rot2(6.2, side * 1.5, h)[0], y + rot2(6.2, side * 1.5, h)[1], z + 2.9)
+            sphere(painter, cam, e, 2.6, (222, 52, 38), bias=1.4, sheen=0.8)
         # 口器(进食时伸向食饵)
         if mode_eat(self):
             p1 = V3(x + rot2(7.4, 0, h)[0], y + rot2(7.4, 0, h)[1], z + 1.6)
@@ -470,36 +481,35 @@ class FlyBase:
                 wang = h + side * (2.15 + flap)
                 wx, wy = math.cos(wang), math.sin(wang)
                 bx, by = rot2(-2, side * 1.6, h)
-                pts = [V3(x + bx, y + by, z + 2.6),
-                       V3(x + bx + wx * 5, y + by + wy * 5, z + 5.2),
-                       V3(x + bx + wx * 13, y + by + wy * 13, z + 3.4),
-                       V3(x + bx + wx * 7 - wy * side * 3, y + by + wy * 7 + wx * side * 3, z + 2.2)]
-                edge = [V3(p.x - wy * side * 0.5, p.y + wx * side * 0.5, p.z + 0.05) for p in pts]
-                flat_polygon(painter, cam, edge, (198, 214, 214), bias=0.26)
-                dome(painter, cam, pts, wing_c, bias=0.3, sheen=0.22)
-                for k in range(3):                        # 翅脉: 由翅基扇形展开
-                    f = 0.35 + 0.3 * k
-                    self._seg(painter, cam,
-                              V3(x + bx + wx * 2.2, y + by + wy * 2.2, z + 3.2),
-                              V3(x + bx + wx * 12.4 * f + wy * side * (1.6 - k),
-                                 y + by + wy * 12.4 * f - wx * side * (1.6 - k),
-                                 z + 3.6 - 0.4 * k), (186, 206, 214), 1)
-                self._seg(painter, cam,
-                          V3(x + bx + wx * 4, y + by + wy * 4, z + 5.0),
-                          V3(x + bx + wx * 12, y + by + wy * 12, z + 3.6),
-                          (252, 252, 244), 1)             # 前缘高光
+                L = 13.0
+                base = V3(x + bx, y + by, z + 2.6)
+
+                def W(u, s, dz):                    # 翅轴 u(0~1) × 横向 s → 世界坐标
+                    return V3(base.x + wx * L * u - wy * side * s,
+                              base.y + wy * L * u + wx * side * s, base.z + dz)
+
+                pts = [base, W(0.30, 2.6, 1.5), W(0.68, 3.0, 1.2),      # 圆头水滴形翅
+                       W(0.97, 1.4, 0.5), W(0.55, -0.9, -0.3)]
+                flat_polygon(painter, cam,
+                             [V3(p.x - wy * side * 0.35, p.y + wx * side * 0.35, p.z + 0.05)
+                              for p in pts], (206, 220, 220), bias=0.26)
+                dome(painter, cam, pts, wing_c, bias=0.3, sheen=0.16)
+                for (u, s) in ((0.95, 0.9), (0.72, 0.2), (0.45, -0.5)):  # 翅脉
+                    limb(painter, cam, W(0.08, 0.2, 0.4), W(u, s, 0.2), 0.22,
+                         (188, 208, 214), bias=0.05, taper=0.6)
+                limb(painter, cam, W(0.10, 1.4, 0.9), W(0.90, 1.5, 0.6), 0.18,
+                     (252, 252, 244), bias=0.02, taper=0.8)      # 前缘高光
         else:
-            # 收拢的翅: 贴在背上沿身体方向的窄翅面, 不再伸出身后形成"重影"
+            # 收拢的翅: 覆盖在腹部两侧、翅尖略微内收(停歇姿态)
             for side in (-1, 1):
-                bx, by = rot2(-1.0, side * 1.0, h)
-                mx, my = rot2(-4.5, side * 1.3, h)
-                tx, ty = rot2(-7.8, side * 0.9, h)
-                pts = [V3(x + bx, y + by, z + 2.2), V3(x + mx, y + my, z + 2.35),
-                       V3(x + tx, y + ty, z + 2.1), V3(x + tx - 0.8, y + ty - 0.8, z + 1.9)]
-                dome(painter, cam, pts, (226, 232, 226), bias=0.55, layer=4, sheen=0.20)
-                self._seg(painter, cam,
-                          V3(x + bx, y + by, z + 2.25),
-                          V3(x + tx, y + ty, z + 2.15), (244, 248, 244), 1)
+                def RL(u, s, dz):                   # 身体局部坐标 → 世界(收翅用)
+                    return V3(x + rot2(u, side * s, h)[0], y + rot2(u, side * s, h)[1], z + dz)
+
+                pts = [RL(-0.6, 1.9, 2.5), RL(-5.2, 2.4, 2.6),
+                       RL(-9.4, 0.7, 2.3), RL(-8.4, 3.2, 2.1)]
+                dome(painter, cam, pts, (226, 232, 226), bias=0.55, layer=4, sheen=0.18)
+                limb(painter, cam, RL(-0.6, 1.9, 2.62), RL(-8.6, 1.6, 2.42), 0.2,
+                     (244, 248, 244), bias=0.4, taper=0.7)
 
 
 def mode_eat(fly):
