@@ -190,59 +190,33 @@ class Frog:
         return V3(self.pos.x + ex, self.pos.y + ey,
                   self.z + lz if lz is not None else self.z)
 
-    def _hind_leg(self, painter, cam, side, gz, swing, airborne, skin, dark):
-        """后腿：股 → 胫 → 跗，折成青蛙特有的 Z 形并收在身体两侧，末端是四趾蹼足。
+    def _foot(self, painter, cam, side, gz, skin, dark, kick=0.0, front=False):
+        """一只简单的蹼足：扇形桨叶 + 三个趾尖。不做腿关节, 只贴在水面上。
 
-        静止时是青蛙的坐姿——膝略微顶出身体轮廓, 长脚掌贴着身体侧面向前收；
-        游动/跳跃时腿才蹬开(swing 驱动)。"""
-        kick = swing / 9.0 if not airborne else 1.0      # -1 ~ 1
-        hip = self._local(-8, side * 15, 9.5)
-        if airborne:                                     # 腾空: 腿向后伸展
-            knee = self._local(-30, side * 20, 8.0)
-            ankle = self._local(-16, side * 26, 7.0)
-            toe = self._local(2, side * 24, 6.5)
-        else:                                            # 坐姿: 股向后外、胫折向前、脚掌贴身边
-            knee = self._local(-24 - 3.0 * kick, side * 32 + 2.0 * abs(kick), 6.5)
-            ankle = self._local(1 + 4.0 * kick, side * 33 + 2.0 * abs(kick),
-                                gz - self.z + 2.2)
-            toe = self._local(17 + 3.0 * kick, side * 29, gz - self.z + 1.4)
-        # 股→胫→跗 三段共用端点、不加端帽 → 连成一条会折的腿, 而不是几节珠子
-        limb(painter, cam, hip, knee, 11.5, mix(skin, dark, 0.14), bias=0.6, taper=0.76)
-        limb(painter, cam, knee, ankle, 8.4, skin, bias=0.3, taper=0.74)
-        limb(painter, cam, ankle, toe, 6.0, mix(skin, dark, 0.14), bias=0.2, taper=0.70)
-        # 关节处用同色圆片"抹圆"转角: 既藏住折线的缺口, 又不会留下亮色珠子
-        head_ang = self.heading
-        flat_polygon(painter, cam, ellipse_pts(knee.x, knee.y, knee.z, 8.4, 7.4, head_ang),
-                     skin, bias=0.28)
-        flat_polygon(painter, cam, ellipse_pts(ankle.x, ankle.y, ankle.z, 6.0, 5.2, head_ang),
-                     mix(skin, dark, 0.12), bias=0.18)
-        for k in range(4):                                  # 蹼趾：从跗端向前扇开
-            ta = self.heading + side * (0.46 - k * 0.30)
-            tip = V3(toe.x + math.cos(ta) * 10, toe.y + math.sin(ta) * 10, toe.z)
-            limb(painter, cam, toe, tip, 3.0, mix(skin, dark, 0.26), bias=0.1, taper=0.5,
-                 cap=True)
-        web = [toe]                                         # 趾间蹼：薄扇形膜, 让后足读作"桨"
-        for k in (0, 3):
-            ta = self.heading + side * (0.46 - k * 0.30)
-            web.append(V3(toe.x + math.cos(ta) * 8.6, toe.y + math.sin(ta) * 8.6, toe.z - 0.2))
-        flat_polygon(painter, cam, web, mix(skin, dark, 0.5), bias=0.05)
-
-    def _front_leg(self, painter, cam, side, gz, swing, airborne, skin, dark):
-        """前腿：肩 → 肘 → 腕，三趾。"""
-        if airborne:
-            elbow = self._local(25, side * 22, 5.0)
-            wrist = self._local(32, side * 16, 3.0)
+        后足在身体后侧、朝外前方张开；前足小一号、贴在头两侧(前足只做视觉点缀)。
+        kick: -1~1，游动时脚掌向外蹬开一点。
+        """
+        if front:
+            bx, by = rot2(18, side * 14, self.heading)
+            size, out_off = 10.0, 1.05
         else:
-            elbow = self._local(24, side * 20, 3.0)
-            wrist = self._local(33 + swing * 0.4 * side, side * 16, gz - self.z + 1.0)
-        shoulder = self._local(14, side * 13, 7.0)
-        limb(painter, cam, shoulder, elbow, 6.4, mix(skin, dark, 0.22), bias=0.4, taper=0.78)
-        limb(painter, cam, elbow, wrist, 4.8, skin, bias=0.2, taper=0.66)
-        for k in range(3):
-            ta = self.heading + side * (0.42 - k * 0.42)
-            tip = V3(wrist.x + math.cos(ta) * 8, wrist.y + math.sin(ta) * 8, wrist.z)
-            limb(painter, cam, wrist, tip, 2.7, mix(skin, dark, 0.24), bias=0.1, taper=0.5,
-                 cap=True)
+            # 身体是"浮"在水面上的(有高度), 脚贴在水面上, 所以脚要往身体正下方收一些,
+            # 否则透视会把脚推到身体后面, 看起来像掉在地上
+            bx, by = rot2(-7 + 2.0 * kick, side * 13 + 1.0 * abs(kick), self.heading)
+            size, out_off = 21.0, 1.26
+        # 脚画在身体下缘的高度(不是水面): 身体是有厚度的椭球, 若把脚放在水面,
+        # 透视会把脚推到身体后方, 看起来像掉在水里
+        cx, cy, z = self.pos.x + bx, self.pos.y + by, self.z + 2.5
+        outward = self.heading + side * out_off
+        pts = [V3(cx, cy, z)]
+        for k in range(3):                                  # 三趾 + 趾间凹口 = 蹼足
+            a = outward + side * (0.34 - k * 0.44)
+            tip = V3(cx + math.cos(a) * size, cy + math.sin(a) * size, z)
+            notch = V3(cx + math.cos(a - side * 0.22) * size * 0.68,
+                       cy + math.sin(a - side * 0.22) * size * 0.68, z)
+            pts.extend([tip, notch])
+        dome(painter, cam, pts, skin, bias=0.15, outline=shade(skin, 0.72), owidth=1,
+             sheen=0.14)
 
     def draw(self, painter, cam, t, pads):
         x, y = self.pos
@@ -252,15 +226,13 @@ class Frog:
         s = 1.0 - self.z / 170.0
         swing = math.sin(self.walk_phase) * 9 if self._moving and self.state == "ground" else 0.0
         airborne = self.state == "air"
+        kick = swing / 9.0                          # -1~1：游动/行走时脚掌向外蹬
         skin = (98, 162, 70)                        # 背部主色
         skin_dark = (58, 104, 44)                   # 阴影/边缘
-        leg_skin = (88, 146, 62)
-        soft_shadow(painter, cam, V3(x + 8, y + 5, gz + 0.18), 44 * s, 33 * s, 0.78, bias=-4)
-        # 远侧腿先画, 近侧腿后画——深度排序会自动区分, 这里只给一点点偏置
-        for side in (-1, 1):
-            self._hind_leg(painter, cam, side, gz, swing, airborne, leg_skin, skin_dark)
-        for side in (-1, 1):
-            self._front_leg(painter, cam, side, gz, swing, airborne, leg_skin, skin_dark)
+        # 不做腿：这个体型的青蛙只保留身体 + 头 + 眼睛, 轮廓最干净(细节越少越不容易出怪)
+        soft_shadow(painter, cam, V3(x + 7, y + 5, gz + 0.18), 38 * s, 30 * s, 0.72, bias=-4)
+        for side in (-1, 1):                                        # 两只简单的蹼足
+            self._foot(painter, cam, side, gz, (76, 132, 58), skin_dark, kick=kick)
         # 身体：多层椭球体(有厚度), 再加一层略大的深色轮廓当投影边
         flat_polygon(painter, cam, self._body_pts(z + 4.0, 1.03), shade(skin_dark, 0.9),
                      bias=-1.2)
