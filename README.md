@@ -152,6 +152,20 @@ Note: flygym 2.1.0 is very new and its API differs from the published tutorials;
 `compose/base.py`. That is an upstream issue, not a bug in this repo — expect to
 adapt the script once flygym ships a patch.
 
+## Notes and limitations
+
+- **The UI is in Chinese.** Fonts are auto-detected (macOS system CJK fonts first,
+  then `pygame.font.match_font`), so on Windows or Linux the HUD may fall back to a
+  font without CJK glyphs and show empty boxes. Fix it by adding a CJK `.ttf` path to
+  `FONT_PATHS` in `main.py` (`main.py:38`).
+- **Silent fallback.** Sound is synthesized into numpy buffers and played through
+  `pygame.sndarray`; with no audio device the game still runs, just mute.
+- **The neural fly is a gameplay model**, not a biophysical simulation — three
+  hand-tuned LIF circuits reproduce the behaviours that are fun to watch and to
+  learn from. For the real Drosophila model, see the NeuroMechFly section above.
+- Tested on macOS with Python 3.14 / pygame-ce 2.5.8 and run headlessly in CI-style
+  smoke tests; other platforms should work but are untested.
+
 ## License
 
 [MIT](LICENSE) — do whatever you like, attribution appreciated.

@@ -147,6 +147,16 @@ python3.12 -m venv .venv-flygym
 注意：flygym 2.1.0 刚发布、API 与官方教程差异较大，`real_fly_demo.py`（组包渲染真·果蝇）
 目前在库内部 `compose/base.py` 的传感器命名处报错，属上游问题，建议等补丁或按官方教程调整。
 
+## 已知限制
+
+- **界面为中文**。字体会自动查找（先 macOS 系统中文字体，再走 `pygame.font.match_font`），
+  在 Windows / Linux 上可能回落到不含中文字形的字体而显示成方框——把中文字体路径加进
+  `main.py` 的 `FONT_PATHS`（`main.py:38`）即可解决。
+- **无音频设备时会静音运行**：音效由 numpy 合成后经 `pygame.sndarray` 播放，没有声卡不影响游戏。
+- **神经元果蝇是游戏化的行为模型**，不是生物物理仿真：三个手工整定的 LIF 环路复现的是
+  "好玩、也便于理解"的行为。想要真正的果蝇模型请看上面的 NeuroMechFly 一节。
+- 开发与测试环境为 macOS + Python 3.14 + pygame-ce 2.5.8，其余平台未做验证。
+
 ## 许可证
 
 [MIT](LICENSE) —— 随便用，署名更好。
