@@ -79,6 +79,118 @@ def ground_z(pos, pads, t):
     return gz
 
 
+def _capsule2(p0, p1, r0, r1, n=14):
+    """2D 胶囊轮廓(两端半径可不同)：两段半圆 + 外公切线。"""
+    ang = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
+    pts = []
+    for i in range(n + 1):
+        a = ang + math.pi / 2 + math.pi * i / n
+        pts.append((p0[0] + math.cos(a) * r0, p0[1] + math.sin(a) * r0))
+    for i in range(n + 1):
+        a = ang - math.pi / 2 + math.pi * i / n
+        pts.append((p1[0] + math.cos(a) * r1, p1[1] + math.sin(a) * r1))
+    return pts
+
+
+def _ellipse2(cx, cy, rx, ry, n=24):
+    return [(cx + math.cos(2 * math.pi * i / n) * rx,
+             cy + math.sin(2 * math.pi * i / n) * ry) for i in range(n)]
+
+
+def _quad_pts(p0, p1, p2, n=9):
+    """二次贝塞尔采样——蹼缘的凹弧用它才顺。"""
+    out = []
+    for i in range(n + 1):
+        t = i / n
+        u = 1 - t
+        out.append((u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
+                    u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1]))
+    return out
+
+
+_FOOT_CACHE: dict[tuple[int, bool], pygame.Surface] = {}
+
+# 精灵里"趾尖到脚踝"占整幅高度的比例——场景缩放要按它换算, 否则脚会被算得过大/过小
+TOE_FRAC_HIND, TOE_FRAC_FRONT = 0.42, 0.34
+FOOT_LEN_HIND, FOOT_LEN_FRONT = 22.0, 13.0      # 世界单位：后足≈体长 0.3, 前足≈后足 0.6 倍
+
+def build_foot_sprite(size=144, webbed=True, supersample=3):
+    """一只俯视的青蛙脚：脚踝在下方中央, 脚趾向上扇开。
+
+    后足 = 五趾 + 趾间蹼；前足 = 四趾无蹼。整张图按 3 倍分辨率画再平滑缩小,
+    边缘因此是抗锯齿的——这是 3D 多边形图元画不出来的效果。
+    """
+    n_toes = 5 if webbed else 4
+    S = size * supersample
+    surf = pygame.Surface((S, S), pygame.SRCALPHA)
+    # 脚踝放在图心：旋转是绕图心做的, 这样贴图时"脚踝"正好落在投影点上
+    cx, base_y = S * 0.5, S * 0.52
+    span = math.radians(96)
+    a0 = -math.pi / 2 - span / 2
+    r_base = S * 0.072
+    toes, shapes = [], []
+    for k in range(n_toes):
+        f = k / (n_toes - 1)
+        a = a0 + span * f
+        long_mid = 1.0 - 0.18 * abs(f - 0.5) * 2
+        L = S * (TOE_FRAC_HIND if webbed else TOE_FRAC_FRONT) * long_mid
+        tip = (cx + math.cos(a) * L, base_y + math.sin(a) * L)
+        r_tip = S * (0.030 if webbed else 0.024)
+        toe_base = (cx + math.cos(a) * L * 0.14, base_y + math.sin(a) * L * 0.14)
+        shapes.append(("c", (toe_base, tip, r_base, r_tip)))
+        toes.append((a, tip, r_tip, toe_base))
+    shapes.append(("p", _ellipse2(cx, base_y - S * 0.040, S * 0.130, S * 0.100)))
+    if webbed:                                   # 趾间蹼：从各趾 2/3 处拉出内凹的膜缘
+        for k in range(n_toes - 1):
+            a_0, t0, r0, b0 = toes[k]
+            a_1, t1, r1, b1 = toes[k + 1]
+            Lm = S * 0.36
+            p0 = (cx + math.cos(a_0) * Lm * 0.66, base_y + math.sin(a_0) * Lm * 0.66)
+            p1 = (cx + math.cos(a_1) * Lm * 0.66, base_y + math.sin(a_1) * Lm * 0.66)
+            amid = (a_0 + a_1) / 2
+            ctrl = (cx + math.cos(amid) * Lm * 0.46, base_y + math.sin(amid) * Lm * 0.46)
+            web = [(cx, base_y - S * 0.02)] + _quad_pts(p0, ctrl, p1, 10) + [(cx, base_y - S * 0.02)]
+            shapes.append(("p", web))
+    OUT = (48, 86, 44)
+    FILL = (96, 156, 68)
+    HI = (142, 198, 98)
+    lw = S * 0.017
+
+    def draw_shapes(color, grow):
+        for kind, data in shapes:
+            if kind == "c":
+                p0, p1, r0, r1 = data
+                pygame.draw.polygon(surf, color, _capsule2(p0, p1, r0 + grow, r1 + grow))
+            else:
+                pts = data
+                if grow:
+                    out = []
+                    for (px, py) in pts:                     # 蹼按径向膨胀出描边
+                        dx, dy = px - cx, py - (base_y - S * 0.02)
+                        d = math.hypot(dx, dy) or 1.0
+                        out.append((px + dx / d * grow, py + dy / d * grow))
+                    pts = out
+                pygame.draw.polygon(surf, color, pts)
+
+    draw_shapes(OUT, lw)
+    draw_shapes(FILL, 0.0)
+    for a, tip, r_tip, toe_base in toes:         # 趾背受光面
+        ox, oy = -math.sin(a) * r_tip * 0.45, math.cos(a) * r_tip * 0.45
+        pygame.draw.polygon(surf, HI, _capsule2(
+            (toe_base[0] + ox, toe_base[1] + oy), (tip[0] + ox * 0.6, tip[1] + oy * 0.6),
+            max(1.0, r_tip * 0.44), max(1.0, r_tip * 0.34)))
+    pygame.draw.polygon(surf, HI, _ellipse2(cx - S * 0.024, base_y - S * 0.072,
+                                            S * 0.062, S * 0.050))
+    return pygame.transform.smoothscale(surf, (size, size))
+
+
+def foot_sprite(size=144, webbed=True):
+    key = (size, webbed)
+    if key not in _FOOT_CACHE:
+        _FOOT_CACHE[key] = build_foot_sprite(size, webbed=webbed)
+    return _FOOT_CACHE[key]
+
+
 # ---------------------------------------------------------------- 青蛙
 class Frog:
     WALK = 175.0
@@ -190,33 +302,41 @@ class Frog:
         return V3(self.pos.x + ex, self.pos.y + ey,
                   self.z + lz if lz is not None else self.z)
 
-    def _foot(self, painter, cam, side, gz, skin, dark, kick=0.0, front=False):
-        """一只简单的蹼足：扇形桨叶 + 三个趾尖。不做腿关节, 只贴在水面上。
+    def _foot(self, painter, cam, side, hind=True, kick=0.0):
+        """把预渲染的脚精灵按投影朝向旋转、按景深缩放后贴进场景。
 
-        后足在身体后侧、朝外前方张开；前足小一号、贴在头两侧(前足只做视觉点缀)。
-        kick: -1~1，游动时脚掌向外蹬开一点。
+        后足：五趾 + 趾间蹼, 长 40 单位, 长在身体后侧、朝外前方张开(青蛙的桨)。
+        前足：四趾无蹼, 长 24 单位(约后足的 0.6 倍), 长在肩侧、朝前外撑地——
+        这是真实青蛙的比例关系。脚画在身体下缘的高度而不是水面: 身体是有厚度的
+        椭球, 放到水面会被透视推到身后, 看起来像掉在水里。
         """
-        if front:
-            bx, by = rot2(18, side * 14, self.heading)
-            size, out_off = 10.0, 1.05
+        if hind:
+            lx, ly = -9.0 + 2.0 * kick, side * (19.0 + 1.0 * abs(kick))
+            foot_len, toe_frac, spread, bias = FOOT_LEN_HIND, TOE_FRAC_HIND, 1.00, 0.15
         else:
-            # 身体是"浮"在水面上的(有高度), 脚贴在水面上, 所以脚要往身体正下方收一些,
-            # 否则透视会把脚推到身体后面, 看起来像掉在地上
-            bx, by = rot2(-7 + 2.0 * kick, side * 13 + 1.0 * abs(kick), self.heading)
-            size, out_off = 21.0, 1.26
-        # 脚画在身体下缘的高度(不是水面): 身体是有厚度的椭球, 若把脚放在水面,
-        # 透视会把脚推到身体后方, 看起来像掉在水里
-        cx, cy, z = self.pos.x + bx, self.pos.y + by, self.z + 2.5
-        outward = self.heading + side * out_off
-        pts = [V3(cx, cy, z)]
-        for k in range(3):                                  # 三趾 + 趾间凹口 = 蹼足
-            a = outward + side * (0.34 - k * 0.44)
-            tip = V3(cx + math.cos(a) * size, cy + math.sin(a) * size, z)
-            notch = V3(cx + math.cos(a - side * 0.22) * size * 0.68,
-                       cy + math.sin(a - side * 0.22) * size * 0.68, z)
-            pts.extend([tip, notch])
-        dome(painter, cam, pts, skin, bias=0.15, outline=shade(skin, 0.72), owidth=1,
-             sheen=0.14)
+            lx, ly = 16.0, side * 11.0
+            foot_len, toe_frac, spread, bias = FOOT_LEN_FRONT, TOE_FRAC_FRONT, 0.62, 0.22
+        ex, ey = rot2(lx, ly, self.heading)
+        wx, wy, z = self.pos.x + ex, self.pos.y + ey, self.z + 2.5
+        p0 = cam.project(V3(wx, wy, z))
+        if p0 is None:
+            return
+        out = self.heading + side * spread
+        p1 = cam.project(V3(wx + math.cos(out) * 30.0, wy + math.sin(out) * 30.0, z))
+        if p1 is None:
+            return
+        sx, sy, depth = p0
+        theta = math.degrees(math.atan2(p1[1] - sy, p1[0] - sx)) + 90.0   # 精灵朝上
+        # 精灵整幅对应的世界长度 = 实际脚长 / 趾尖占比 → 屏上大小正好是这只脚的尺寸
+        target = (foot_len / toe_frac) * cam.focal / depth
+        if target < 4:
+            return
+        img = pygame.transform.rotozoom(foot_sprite(144, hind), theta, target / 144.0)
+        rect = img.get_rect()
+        rect.center = (int(sx), int(sy))            # 图心 = 脚踝, 直接以投影点为中心
+        # 放在 BANK 层(3): 永远在身体(4)之下, 但可以和荷叶按深度正确互遮
+        painter.add(depth - bias, lambda s, img=img, rect=rect: s.blit(img, rect),
+                    Painter.BANK)
 
     def draw(self, painter, cam, t, pads):
         x, y = self.pos
@@ -231,8 +351,10 @@ class Frog:
         skin_dark = (58, 104, 44)                   # 阴影/边缘
         # 不做腿：这个体型的青蛙只保留身体 + 头 + 眼睛, 轮廓最干净(细节越少越不容易出怪)
         soft_shadow(painter, cam, V3(x + 7, y + 5, gz + 0.18), 38 * s, 30 * s, 0.72, bias=-4)
-        for side in (-1, 1):                                        # 两只简单的蹼足
-            self._foot(painter, cam, side, gz, (76, 132, 58), skin_dark, kick=kick)
+        for side in (-1, 1):                    # 后足(五趾蹼足) —— 先画, 根部让身体压住
+            self._foot(painter, cam, side, hind=True, kick=kick)
+        for side in (-1, 1):                    # 前足(四趾, 约后足 0.6 长)
+            self._foot(painter, cam, side, hind=False)
         # 身体：多层椭球体(有厚度), 再加一层略大的深色轮廓当投影边
         flat_polygon(painter, cam, self._body_pts(z + 4.0, 1.03), shade(skin_dark, 0.9),
                      bias=-1.2)
