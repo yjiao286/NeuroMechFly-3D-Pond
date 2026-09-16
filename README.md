@@ -1,315 +1,270 @@
-# 🧠 Fly Brain Pond 3D 🐸🪰
+# 🧠 NeuroMechFly-3D-Pond
 
-### A hand-written 3D pond with nine fruit flies — and exactly one of them thinks with spiking neurons.
-
-You play a frog: hop across lily pads, flick your tongue, and hunt. Eight of the flies are
-ordinary scripted NPCs. The ninth — the one wearing the gold box — runs on a leaky
-integrate-and-fire network: giant-fibre escape, central-complex steering, and a rest circuit
-that gates feeding. Press `B` and you can watch its membrane potentials charge toward threshold
-while you close in on it.
-
-And because a cartoon shouldn't be the only fly in the pond, this repo also assembles and renders
-**NeuroMechFly** — the real, micro-CT-scanned *Drosophila* neuromechanical model from EPFL's
-FlyGym.
+**A 60 FPS, engine-free 3D pond in ~2.3k lines of Python** — software-projected, software-shaded,
+no OpenGL and no asset files beyond the source itself. Nine fly agents inhabit the pond; exactly
+one of them is driven by a **spiking neural network** of leaky integrate-and-fire neurons
+(giant-fibre escape reflex, central-complex steering, rest-gated feeding). The same repository
+assembles, simulates and renders the **real NeuroMechFly** body model — micro-CT meshes,
+126 rotational DoF, compound-eye readout — on MuJoCo.
 
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![pygame-ce](https://img.shields.io/badge/pygame--ce-2.5-6cbf4a)
-![renderer](https://img.shields.io/badge/3D%20renderer-hand--written-2f6f5f)
-![FlyGym](https://img.shields.io/badge/FlyGym-NeuroMechFly%202.1-8a5cf6)
+![renderer](https://img.shields.io/badge/3D%20renderer-software%20rasteriser-2f6f5f)
+![loc](https://img.shields.io/badge/code-~2.3k%20lines-informational)
+![FlyGym](https://img.shields.io/badge/FlyGym-NeuroMechFly%202.1%20%2F%20MuJoCo%203.9-8a5cf6)
 ![license](https://img.shields.io/badge/license-MIT-4c8f4c)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-![NeuroMechFly: the real fruit fly model, composed from micro-CT meshes and rendered in MuJoCo](docs/images/neuromechfly.png)
+![NeuroMechFly: the real fruit fly model rendered from its micro-CT meshes in MuJoCo](docs/images/neuromechfly.png)
 
-*This is not a sprite. `real_fly_demo.py` builds the **real** fly — 70 body segments, 126 joint
-DOF, six adhesion actuators in the feet and two compound-eye cameras — from the micro-CT meshes
-that ship with FlyGym, and renders it offscreen in MuJoCo. Mechanics and neuro interfaces are in
-[The real fly](#-the-real-fly-flygym--neuromechfly); the game's own spiking fly is
-[the individual](#the-individual--神经元个体).*
+*MuJoCo offscreen render of the model assembled by [`real_fly_demo.py`](real_fly_demo.py): 70 body
+segments, 126 rotational DoF, 132 actuators (126 position + 6 tarsal adhesion), 2 eye cameras.
+Not a game asset — see [§5](#5-the-real-fly-flygym--neuromechfly-pipeline).*
+
+![The fly's compound-eye readout: fisheye camera view and the 721-ommatidia mosaic](docs/images/fly-vision.png)
+
+*Vision interface of the same model. Left: left-eye camera (512 × 450 px, 157° FOV, fisheye
+corrected). Right: the same frame resampled onto the hexagonal ommatidia mosaic — 721 per eye —
+split by ommatidia type (R = yellow, G = pale). This mosaic is the retina's actual output; a
+rectangular image never reaches the brain.*
 
 ---
 
 ## Contents
 
-- [The individual — 神经元个体](#the-individual--神经元个体)
-- [Where this sits in the fruit-fly brain moment](#where-this-sits-in-the-fruit-fly-brain-moment)
-- [The real fly: FlyGym / NeuroMechFly](#-the-real-fly-flygym--neuromechfly)
-- [The pond: quick start, controls, foraging](#the-pond)
-- [How the 3D works](#how-the-3d-works)
-- [Project layout](#project-layout) · [Regression test](#regression-test) · [Notes](#notes-and-limitations)
+| § | Section |
+|---|---|
+| 1 | [System overview](#1-system-overview) |
+| 2 | [The spiking agent](#2-the-spiking-agent) |
+| 3 | [Renderer](#3-renderer) |
+| 4 | [Scenery, modelling and materials](#4-scenery-modelling-and-materials) |
+| 5 | [The real fly: FlyGym / NeuroMechFly pipeline](#5-the-real-fly-flygym--neuromechfly-pipeline) |
+| 6 | [Related work](#6-related-work) |
+| 7 | [Build, run, controls](#7-build-run-controls) |
+| 8 | [Verification](#8-verification) |
+| 9 | [Known limitations](#9-known-limitations) |
 
 ---
 
-## The individual — 神经元个体
+## 1 · System overview
 
-Every fly in the pond flies, walks, feeds and grooms. One of them also *decides*. The brain
-([`fly_brain.py`](fly_brain.py)) is a small spiking network of leaky integrate-and-fire neurons,
-integrated with sub-stepping every frame — and it is not decoration: the fly does nothing until
-a circuit fires.
+Two independent stacks live in one repository. Stack A is the game: a deterministic simulation
+loop plus a hand-written rasteriser. Stack B is the FlyGym bridge: it composes a scientific
+MuJoCo model and renders it offline. They share no code beyond `V3 = pygame.math.Vector3`.
 
-![The gold-outlined neural fly, with its GF / CX / REST activation panel open on the right](docs/images/neural-fly.png)
-
-*The gold-outlined fly is the only one driven by a spiking network. The panel on the right shows
-its four circuits charging toward threshold in real time — here the frog has walked inside GF's
-170-unit escape radius and the giant-fibre bar is almost full.*
-
-| Circuit | Role | Tau | Fires when |
+| Subsystem | File | LoC | Responsibility |
 |---|---|---|---|
-| **GF** — giant fibre | Escape reflex | 0.05 s | The frog closes within ~170 units, or a hop shadow sweeps past → full-speed flight for 0.85 s + 1.6 s refractory |
-| **CX_L / CX_R** — central complex | Steering | 0.25 s | Left/right oscillators compete; their difference, with inertia, produces smooth non-repetitive cruising |
-| **REST** — rest circuit | Feeding gate | 0.6 s | Membrane charges slowly while hovering over a crumb; crossing threshold releases the landing manoeuvre. Takes off again after 2.5 s without food, or 12 s of resting |
-| Olfactory bias | Navigation | — | When hungry, headings are nudged toward the nearest crumb |
+| Game loop, agents, HUD | [`main.py`](main.py) | 1016 | 60 FPS fixed-step loop, frog kinematics, both fly classes, HUD, headless selftest |
+| Software renderer | [`render3d.py`](render3d.py) | 333 | `Camera3D` perspective projection, `Painter` depth sorter, material primitives |
+| Neural agent | [`fly_brain.py`](fly_brain.py) | 155 | LIF neuron, GF / CX / REST circuits, sensory integration, motor commands |
+| Scene | [`scenery.py`](scenery.py) | 654 | Water, caustics, ripples, lily pads, crumbs, banks, props, sky, camera-keyed cache |
+| Audio | [`sounds.py`](sounds.py) | 127 | Procedural synthesis at 22.05 kHz (croak, splash, crunch, wing buzz, tongue snap) |
+| FlyGym bridge | [`real_fly_demo.py`](real_fly_demo.py) | 166 | Composes NeuroMechFly in MuJoCo, renders body + retina readouts |
 
-Threshold is −52 mV, resting potential −70 mV. The `B` panel draws one bar per neuron showing
-how far it is from firing, so you can literally watch GF charge as you walk the frog toward the
-gold fly — and watch it drain again after the fly bolts.
+Runtime invariants: window 1280 × 800 (`SCALED │ RESIZABLE`), 60 FPS cap, simulation timestep
+clamped to 1/20 s to survive stalls, world units are ~mm-equivalent pond units, and every
+randomised layout is seeded.
 
-The other eight flies ([`ScriptedFly`](main.py)) are waypoint NPCs: forage → land → chew, and if
-the frog comes within 110 units they run. The neural fly reacts from much farther away, because
-its threshold, not a script, decides when it has had enough of you.
+## 2 · The spiking agent
 
-## Where this sits in the fruit-fly brain moment
+`fly_brain.py` implements `dv/dt = (−(v − v_rest) + I)/τ` with threshold-reset dynamics, integrated
+in sub-steps of τ/2 for stability. Defaults: `v_rest = −70 mV`, `v_thr = −52 mV`,
+`v_reset = −76 mV`; a spike is one sample of `fired`, and `activation ∈ [0,1]` is the normalised
+distance to threshold — this is what the `B` panel plots.
 
-*Drosophila* has quietly become the most exciting model system in neuroscience — it is the first
-animal with a **complete adult brain wiring diagram**, and those wiring diagrams are now being
-wired into simulated bodies.
+| Circuit | FlyGym-free analogue | τ | Drive | Fires when |
+|---|---|---|---|---|
+| **GF** giant fibre | escape reflex | 0.05 s | `55 · max(0, 1 − d_frog/260)`, ×3 while airborne | threat inside ~170 units, or a hop shadow overhead → 0.85 s escape thrust ×3.1, then 1.6 s refractory |
+| **CX_L / CX_R** central complex | heading control | 0.25 s | competing slow oscillators | read out as an amplitude difference; produces smooth, non-periodic cruising |
+| **REST** rest/arousal | feeding gate | 0.6 s | `45 · rest_fill` while hovering and threat < 0.25 | crossing threshold releases the landing manoeuvre; abort after 2.5 s without food or 12 s of resting |
+| Olfactory bias | chemotaxis | — | heading nudge toward the nearest crumb | hunger state |
 
-- **2024 — the whole brain, mapped.** FlyWire reconstructed an adult brain containing
-  **139,255 neurons and ~5 × 10⁷ chemical synapses**, then annotated it into cell types.
-- **2024 — the whole brain, running.** Connectome-constrained models reproduced real
-  sensorimotor processing (sugar sensing and feeding) and predicted single-neuron responses
-  across the visual system.
-- **2024–2025 — the brain, embodied.** NeuroMechFly v2 and FlyBody put a physics-simulated fly
-  under a neural controller, the latter wiring muscles to connectome-derived motor neurons.
+The eight remaining agents (`ScriptedFly`) are finite-state waypoint controllers: forage → land →
+chew, flee below 110 units (re-arm at 260). The spiking agent flees at ~170 units, which is the
+observable difference between a threshold detector and a scripted trigger.
 
-This repo is the fun-size end of that spectrum: four neurons, 60 FPS, no GPU, no engine — a fly
-you can actually chase around a pond with a frog. And because a cartoon shouldn't be the only
-thing here, the repo **also installs and renders the real NeuroMechFly body**, including its
-compound-eye readout. Going from the 4-neuron cartoon to the scientific model is one command
-([below](#run-it)).
-
-### Standing on the shoulders of
-
-| Project | What it gives you | Where |
+| | `ScriptedFly` | `BrainFly` |
 |---|---|---|
-| **FlyWire** — whole-brain connectome of an adult female fly: 139,255 neurons, ~5 × 10⁷ chemical synapses | the wiring diagram everything else is built on | [Dorkenwald et al., *Nature* 634, 124–138 (2024)](https://doi.org/10.1038/s41586-024-07558-y) · [flywire.ai](https://flywire.ai) · [annotations repo](https://github.com/flyconnectome/flywire_annotations) |
-| **Whole-brain annotation & cell typing** | names, types and stereotypy for every one of those neurons | [Schlegel et al., *Nature* 634, 139–152 (2024)](https://doi.org/10.1038/s41586-024-07686-5) |
-| **fly-brain — a computational brain model** | connectome-driven simulation that reproduces sugar sensing and feeding behaviour | [Shiu et al., *Nature* 634, 210–219 (2024)](https://doi.org/10.1038/s41586-024-07763-9) |
-| **Hemibrain connectome** | the central-brain reconstruction that started the fly-connectome era | [Scheffer et al., *eLife* 9:e57443 (2020)](https://doi.org/10.7554/eLife.57443) |
-| **Male nerve cord connectome (MANC)** | descending commands becoming walking — the motor side of the loop | [Takemura et al., *eLife* (2024)](https://doi.org/10.7554/eLife.97769) |
-| **NeuroMechFly v2 / FlyGym** | the embodied neuromechanical fly — **the model installed and rendered here** | [Wang-Chen et al., *Nature Methods* 21, 2353–2362 (2024)](https://doi.org/10.1038/s41592-024-02497-y) · [neuromechfly.org](https://neuromechfly.org) · [NeLy-EPFL/flygym](https://github.com/NeLy-EPFL/flygym) |
-| **FlyBody** | whole-body physics with connectome-derived neuromuscular wiring | [Vaxenburg et al., *Nature* (2025)](https://doi.org/10.1038/s41586-025-09029-4) · [TuragaLab/flybody](https://github.com/TuragaLab/flybody) |
-| **Connectome-constrained deep mechanistic networks** | predicting single-neuron visual responses from the optic-lobe wiring | [Lappalainen et al., *Nature* 634 (2024)](https://doi.org/10.1038/s41586-024-07939-3) · [TuragaLab/flyvis](https://github.com/TuragaLab/flyvis) |
+| Decision source | state machine + tuned constants | LIF membrane potentials |
+| Escape trigger | distance < 110 | GF threshold crossing (~170) |
+| Feeding | timer | REST gate |
+| Introspection | none | `B` panel: per-neuron activation, live |
+| Count in pond | 8 | 1 (gold bracket + label) |
 
-## 🧬 The real fly: FlyGym / NeuroMechFly
+## 3 · Renderer
 
-The render at the [top of this page](#-fly-brain-pond-3d-) is **not a game asset**. It is assembled
-by [`real_fly_demo.py`](real_fly_demo.py) from the micro-CT meshes shipped with
-[FlyGym](https://neuromechfly.org) — the EPFL platform for embodied *Drosophila* sensorimotor
-research — and rendered offscreen in MuJoCo.
+No GPU, no depth buffer. The pipeline is: world → view transform → near-plane clip
+(Sutherland–Hodgman, `NEAR = 14`) → perspective projection (`focal = 1050 px`) → deferred painter
+submission → per-layer depth sort → blit. Polygons are queued as closures and executed in
+`Painter.flush`, which is what makes explicit ordering control possible.
 
-### Mechanics — a fly you can push, pull and grip with
+| Layer | Contents | Ordering rule |
+|---|---|---|
+| 0 `WATER` | water body (40 × 8 colour cells) | flat, always first |
+| 1 `FX` | ripple dashes, caustics, foam ring, ripples, duckweed | above water only |
+| 2 `PAD` | reserved for pad decals | — |
+| 3 `BANK` | bank walls, meadow, pebbles, rocks, bushes (cached), reeds, grass | depth-sorted, camera-keyed cache for static props |
+| 4 `MAIN` | frog, flies, particles, tongue | depth-sorted, drawn last |
 
-| What | In the model |
-|---|---|
-| **Body** | 70 body segments from a **micro-CT scan of a real fly**: head and proboscis, antennae (pedicel / funiculus / arista), a six-segment abdomen, halteres, wings, and six seven-link legs |
-| **Joints** | **126 rotational DOF** with per-joint stiffness, damping and armature. `JointPreset.ALL_BIOLOGICAL` gives each leg 11 (coxa 3, trochanterfemur 2, tibia 1, tarsus 1–5 one each — the distal tarsal joints are passive, as in the animal) |
-| **Actuators** | **132** in the demo build: one position actuator per DOF (the muscle proxy that tutorials drive with CPGs, inverse kinematics or RL), plus **6 adhesion actuators on the tarsus5 tips** — ctrl 0→1 lets the fly stick to or release from a surface |
-| **Contact** | per-body-segment contact presets, per-leg ground-contact sensors, and per-segment contact-force readouts |
-| **Physics** | MuJoCo 3.9 at a 1 ms timestep; `flygym[warp]` swaps in a MuJoCo-Warp backend that steps thousands of flies in parallel |
+**Why two layers matter.** Sorting a small creature against a huge ground polygon by mean depth
+breaks as soon as the creature is on the far half of that polygon. Splitting the scene into
+"flat, always underneath" and "volumetric, depth-sorted" removes the failure mode, and explicit
+per-object `bias` values separate coplanar parts (leaf top / veins / underside, shadow vs. body).
 
-Two more body models share the same API: **FlyBody** ([above](#standing-on-the-shoulders-of))
-adds wing pitch/roll/yaw and abdomen DOF through tendon actuators with biomechanically calibrated
-joint parameters, and **FlyMimic / `MusculoskeletalFly`** drives the left front leg with 15
-Hill-type muscles and 15 spatial tendons.
+**Materials.** A single world-space key light (`LIGHT_XY`) drives all shading, so highlights stay
+consistent under camera orbit:
 
-### Neuro — sense → circuit → muscle
+| Primitive | Use | Shading model |
+|---|---|---|
+| `sphere()` | bushes, rocks, eyes, crumbs, joints | rim-darkened base → inset light-shifted layers → specular dot → outline; small-radius LOD |
+| `dome()` | frog back/head, lily pads, pebbles, wings | edge darkening → inset highlight toward the light → sheen |
+| `soft_shadow()` | every grounded object | cached radial-falloff sprite scaled to the projected ellipse |
+| `flat_polygon()` / `segment()` / `polyline()` | water, veins, stems, tongue | flat fill with depth bias |
 
-FlyGym is a neuroscience platform first: every channel a neural circuit needs is exposed.
+Measured cost, headless software rendering with the entire pond in frame: **≈ 17.7 ms/frame**
+(1024 × 800 dummy SDL, Python 3.14, pygame-ce 2.5.8). The static bank layer is re-rendered only
+when the camera rig changes, which is where most of the headroom comes from.
 
-- **Vision** — `add_vision()` puts a camera inside each compound eye: **157° FOV, 721 ommatidia
-  per eye**, with hex sampling and fisheye distortion matched to the real optics. Readouts come
-  back split by the two ommatidia types (yellow / pale).
-- **Proprioception** — joint angles and velocities for all 126 DOF, plus body and joint-site poses.
-- **Mechanosensation** — contact forces per body segment, i.e. what each foot is feeling.
-- **Motor side** — 126 joint targets plus 6 adhesion channels. In FlyBody the wiring itself is the
-  published connectome-derived motor-neuron → muscle map.
+## 4 · Scenery, modelling and materials
 
-![What the fly's compound eye sees: the fisheye camera view and the 721-ommatidia readout](docs/images/fly-vision.png)
+All geometry is generated at run time from seeded RNGs; the repository contains no mesh, no
+texture and no audio file.
 
-*Left: the left eye camera (fisheye-corrected) — the fly's own foreleg and a block terrain.
-Right: the same frame sampled through the 721-ommatidia mosaic, R = yellow type, G = pale type.
-That mosaic, not a rectangular image, is what a fly's brain actually receives.*
+| Element | Model | Texture / shading |
+|---|---|---|
+| Water | pond plane ±620 × ±350, activity region ±545 × ±285 | 3 layers: atmosphere gradient (40 × 8 cells) + drifting ripple dashes + caustic sparkle field; shoreline foam ring |
+| Lily pads | 6 pads, r 46–66, notch + veins + optional lotus, bobbing on `sin(1.2t + φ) · 1.6` | radial veins tapering outward, lifted near-edge rim, leaf underside, soft contact shadow |
+| Frog | dome body + head, 6 jointed legs, 3 toes each, gold eye pair with pupil glint, tongue as a 7-bead chain | dorsal ridge highlight, camouflage spots, belly shading, contact shadow |
+| Flies | 3-segment abdomen, thorax with bristles, head + antennae + halteres, 6 two-segment legs with 7 links total, veined wings | per-part shading, wing veins and leading-edge highlight, soft shadows, translucent folded wings |
+| Banks | 4 walls × 8 segments, 44-unit rim, meadow to 2600 units | wet→dry sand gradient, pebbles, rock speckle, bush clusters, haze-faded meadow, drifting clouds, horizon glow |
 
-### Run it
+Pose and gait logic covers four fly states — flight (wing beat, legs tucked), walking (tripod
+gait, step frequency ∝ speed), feeding (mouthparts on the crumb, front legs rubbing), grooming
+(front legs circling the eyes for 1.2 s, the real *Drosophila* cleaning behaviour).
+
+## 5 · The real fly: FlyGym / NeuroMechFly pipeline
+
+[`real_fly_demo.py`](real_fly_demo.py) composes EPFL's
+[NeuroMechFly](https://neuromechfly.org) through the FlyGym 2.x composition API and renders it
+offscreen — the two images at the top of this page are its output.
+
+| Stage | API call | Result |
+|---|---|---|
+| Body | `NeuroMechFly()` + `colorize(visuals.yaml)` | 70 micro-CT body segments, materials applied |
+| Articulation | `Skeleton(AxisOrder.PITCH_YAW_ROLL, JointPreset.ALL_BIOLOGICAL)` + `add_joints()` | 126 rotational DoF, per-joint stiffness / damping / armature |
+| Actuation | `add_actuators(..., ActuatorType.POSITION)` | 126 position actuators — the muscle proxy |
+| Adhesion | `add_leg_adhesion()` | 6 tarsus5 adhesion actuators, `ctrl ∈ [0,1]` |
+| Vision | `add_vision()` | 2 eye cameras → `get_raw_vision()` and `get_ommatidia_readouts()` |
+| Physics | `FlatGroundWorld` / `BlocksTerrainWorld` + `Simulation` | MuJoCo 3.9, 1 ms timestep |
+
+Interfaces exposed to a controller (i.e. what a neural circuit would read and write):
+
+| Direction | Channel | Resolution |
+|---|---|---|
+| sense | vision | 2 × 721 ommatidia, yellow/pale split, 157° FOV per eye, fisheye model |
+| sense | proprioception | joint angles + velocities for all 126 DoF |
+| sense | mechanosensation | per-segment contact forces (per-leg ground sensors on simple worlds) |
+| act | motor | 126 joint targets + 6 adhesion channels |
 
 ```bash
-python3.12 -m venv .venv-flygym                    # flygym 2.1.0 wants Python 3.12+
+python3.12 -m venv .venv-flygym                  # FlyGym 2.1.0 requires Python 3.12+
 .venv-flygym/bin/pip install -r requirements-flygym.txt
-.venv-flygym/bin/python real_fly_demo.py           # writes both PNGs above
+.venv-flygym/bin/python real_fly_demo.py         # → docs/images/{neuromechfly,fly-vision}.png
 ```
-
-The script prints the model it assembled:
 
 ```
 NeuroMechFly: 70 个体节 / 126 个关节自由度 / 132 个执行器（含 6 个足端附着）/ 2 个复眼相机
 ```
 
-The game fly runs at 60 FPS on pure pygame; this one is a physics simulation — a second or two
-per rendered frame, and about a minute on the first run while Numba JIT-compiles the retina.
-`pip install "flygym[warp]"` adds the GPU backend; `"flygym[rl]"` adds Gymnasium +
-Stable-Baselines3 if you want to train locomotion policies against it.
+First run is dominated by Numba JIT on the retina path (~1 min); later runs render in seconds.
+`pip install "flygym[warp]"` enables the MuJoCo-Warp backend for batched simulation;
+`"flygym[rl]"` adds Gymnasium + Stable-Baselines3 for locomotion policies.
 
-### In-game fly vs. the real model
+### Game agent vs. scientific model
 
-| | In-game fly ([`fly_brain.py`](fly_brain.py)) | FlyGym / NeuroMechFly |
+| | Game fly ([`fly_brain.py`](fly_brain.py)) | NeuroMechFly |
 |---|---|---|
-| Body | a few dozen hand-written polygons | 70 micro-CT meshes |
-| "Brain" | 4 LIF neurons (GF / CX_L / CX_R / REST) | whatever circuit you bring — the model supplies body, senses and muscles |
-| Vision | none — the fly "sees" by distance checks | 721 ommatidia per eye, hex + fisheye |
-| Time | 60 FPS real time | MuJoCo physics, 1 ms steps |
-| Purpose | a game | neuroscience, biomechanics, RL |
+| Body | a few dozen generated polygons | 70 micro-CT meshes |
+| Articulation | kinematic, scripted gaits | 126 DoF with joint dynamics |
+| Controller | 4 hand-tuned LIF circuits | user-supplied circuit / CPG / RL policy |
+| Vision | distance checks | 721-ommatidia retina per eye |
+| Timestep | 1/60 s, pure Python | 1 ms, MuJoCo |
+| Purpose | interaction and pedagogy | sensorimotor neuroscience |
 
-## The pond
+## 6 · Related work
 
-### Quick start
+Context for the spiking agent: *Drosophila* is the only animal with a complete adult brain wiring
+diagram, and those diagrams are now being coupled to simulated bodies.
 
-Requires Python 3.10+ (developed on 3.14). Nothing but `pygame` and `numpy` — no engine, no
-OpenGL, no assets: every polygon is projected, depth-sorted and drawn by hand in
-[`render3d.py`](render3d.py).
+| Work | Contribution | Link |
+|---|---|---|
+| FlyWire whole-brain connectome | 139,255 neurons, ~5 × 10⁷ chemical synapses | [Dorkenwald et al., *Nature* 634, 124–138 (2024)](https://doi.org/10.1038/s41586-024-07558-y) · [flywire.ai](https://flywire.ai) · [annotations](https://github.com/flyconnectome/flywire_annotations) |
+| Whole-brain annotation and cell typing | cell types and cross-individual stereotypy | [Schlegel et al., *Nature* 634, 139–152 (2024)](https://doi.org/10.1038/s41586-024-07686-5) |
+| Computational whole-brain model | connectome-constrained model reproducing sugar sensing and feeding | [Shiu et al., *Nature* 634, 210–219 (2024)](https://doi.org/10.1038/s41586-024-07763-9) |
+| Hemibrain connectome | the central-brain reconstruction that opened the field | [Scheffer et al., *eLife* 9:e57443 (2020)](https://doi.org/10.7554/eLife.57443) |
+| Male nerve cord connectome | descending commands → motor output | [Takemura et al., *eLife* (2024)](https://doi.org/10.7554/eLife.97769) |
+| **NeuroMechFly v2 / FlyGym** | embodied neuromechanics — the model installed and rendered here | [Wang-Chen et al., *Nature Methods* 21, 2353–2362 (2024)](https://doi.org/10.1038/s41592-024-02497-y) · [neuromechfly.org](https://neuromechfly.org) · [NeLy-EPFL/flygym](https://github.com/NeLy-EPFL/flygym) |
+| FlyBody | whole-body physics with connectome-derived neuromuscular wiring | [Vaxenburg et al., *Nature* (2025)](https://doi.org/10.1038/s41586-025-09029-4) · [TuragaLab/flybody](https://github.com/TuragaLab/flybody) |
+| Connectome-constrained deep mechanistic networks | single-neuron visual responses from optic-lobe wiring | [Lappalainen et al., *Nature* 634 (2024)](https://doi.org/10.1038/s41586-024-07939-3) · [TuragaLab/flyvis](https://github.com/TuragaLab/flyvis) |
+
+## 7 · Build, run, controls
 
 ```bash
-git clone https://github.com/yjiao286/neuro-pond.git
-cd neuro-pond
+git clone https://github.com/yjiao286/NeuroMechFly-3D-Pond.git
+cd NeuroMechFly-3D-Pond
 
 python -m venv .venv
-.venv/bin/pip install -r requirements.txt   # Windows: .venv\Scripts\pip
+.venv/bin/pip install -r requirements.txt        # Windows: .venv\Scripts\pip
 
 .venv/bin/python main.py
 ```
 
-### Controls
+Requires Python 3.10+ (developed on 3.14); dependencies are `pygame-ce` and `numpy` only.
 
-| Input | Action |
-|---|---|
-| Arrow keys / `WASD` | Swim in the direction you push (the frog turns to face it) |
-| `Space` | Hop — anything within 60 units of the landing spot is squashed |
-| Left click / `F` | **Flick tongue** at the nearest target ahead (holding and dragging the left button pans the camera instead — no accidental tongue) |
-| Right-drag | Orbit the camera — horizontal drag circles the pond, vertical drag sets the pitch between 10° and 62° |
-| Mouse wheel | Zoom in / out |
-| `B` | Neural panel: live GF / CX_L / CX_R / REST activation bars plus a legend |
-| `M` | Mute |
-| `F11` | Fullscreen / windowed |
-| `Esc` | Quit |
+| Input | Action | Implementation detail |
+|---|---|---|
+| Arrows / `WASD` | swim | velocity = 175 u/s, heading smoothed with an exponential turn rate |
+| `Space` | hop | 310 u over 0.62 s, quadratic arc, 62 u peak; 60 u kill radius on landing |
+| Left click / `F` | tongue strike | 200 u range, 17 u capture radius, ±1.15 rad cone, 0.30 s cycle |
+| Left-drag | pan camera | grab-style pan, speed ∝ zoom |
+| Right-drag | orbit camera | yaw free, pitch clamped 18°–62° |
+| Wheel | zoom | distance clamped 420–3200, default 1526 |
+| `B` | neural panel | GF / CX_L / CX_R / REST activation bars + legend |
+| `M` / `F11` / `Esc` | mute / fullscreen / quit | — |
 
-### Foraging loop
-
-Crumbs grow on random lily pads. Flies smell them, hover, and then land to chew — a pad's crumb
-shrinks and disappears when eaten, and a new one sprouts on some pad 8–14 s later. A fly that is
-busy feeding or grooming is **not** watching you, which is exactly when to flick your tongue.
-Everything else in the pond is scenery, drawn by [`scenery.py`](scenery.py): caustics, ripples,
-bobbing lily pads, lotus flowers, duckweed, sand banks, rocks, reeds, bulrushes and bushes.
-
-![Wider view of the pond: lily pads, lotus flowers, banks and flies](docs/images/preview.png)
-
-### The flies' behaviour and animation
-
-Each fly is modelled in 3D — three-segment abdomen, bristled thorax, head with antennae and
-compound eyes, six hip→knee→foot two-segment legs, veined wings — with a distinct animation per
-state: **flying** (wings beating, legs tucked), **walking** (tripod gait, step frequency following
-speed), **feeding** (mouthparts to the crumb, front legs rubbing it), and **grooming** (front legs
-drawing circles over the eyes for 1.2 s — the real *Drosophila* cleaning behaviour).
-
-![Close view of a fly](docs/images/near60.png)
-
-## How the 3D works
-
-Everything lives in [`render3d.py`](render3d.py): a `Camera3D` doing perspective projection with a
-yaw/pitch orbit rig, a `Painter` collecting polygons, and primitives (`flat_polygon`, `sphere`,
-`segment`, `polyline`, `ellipse_pts`) with near-plane clipping.
-
-On top of that sits a small procedural **material system**, because "hand-written renderer" does
-not have to mean flat colour:
-
-- **One key light for the whole scene** (`LIGHT_XY`): every sphere and dome shades toward the same
-  world-space sun, so highlights stay consistent while the camera orbits.
-- **`sphere()`** draws a rim-darkened base with progressively inset, light-shifted layers, then a
-  specular dot and a thin outline — this is what turns bushes, rocks, eyes and crumbs from flat
-  discs into lit volumes.
-- **`dome()`** does the same for flat-ish bodies (frog back, head, lily pads, pebbles): edge
-  darkening → inset highlight → sheen.
-- **`soft_shadow()`** blits a cached radial-falloff sprite scaled to the projected ellipse, so
-  shadows are soft instead of hard polygons.
-- **Water** is three layers — a smooth north–south atmosphere gradient, drifting ripple dashes and
-  a caustic sparkle field. **Lily pads** get radial veins, a lifted near-edge rim and a leaf
-  underside; the **meadow** fades into haze with scattered tufts; the sky carries a warm horizon
-  glow and drifting clouds.
-- Static scenery (walls, meadow, pebbles, rocks, bushes) is rendered once into a cached offscreen
-  layer keyed by the camera rig, so a full-pond view costs about **18 ms per frame in software
-  rendering**, with the swaying reeds and grass still live.
-
-Naive painter's-algorithm sorting breaks the moment a small creature stands on the far half of a
-huge ground polygon — the ground wins the sort and swallows the creature. Fly Brain Pond 3D
-solves it with **two draw layers**:
-
-1. **Ground layer (drawn first):** water bands, caustics, every lily pad layer, crumbs and
-   ripples — flat things always sit underneath.
-2. **Main layer (drawn after, depth-sorted):** frog, flies, and the 3D bank walls, rocks, reeds
-   and bushes.
-
-Ground creatures additionally sample the lily-pad surface height (which follows the wave
-animation), so feet rest *on* the leaf instead of sinking into it.
-
-## Project layout
-
-| File | Contents |
-|---|---|
-| [`main.py`](main.py) | Game loop, orbit camera rig, input, 3D frog, both fly classes, HUD, selftest |
-| [`render3d.py`](render3d.py) | The mini 3D layer: `Camera3D`, `Painter`, projection, clipping, primitives |
-| [`fly_brain.py`](fly_brain.py) | LIF spiking neurons and the `FlyBrain` circuit (GF / CX / REST) |
-| [`scenery.py`](scenery.py) | Water, caustics, ripples, lily pads, lotus, crumbs, duckweed, banks, rocks, grass, reeds, bushes, sky |
-| [`sounds.py`](sounds.py) | Procedurally synthesized sound effects (croak, splash, crunch, buzz, tongue) |
-| [`real_fly_demo.py`](real_fly_demo.py) | Assembles EPFL's NeuroMechFly (joints, actuators, adhesion, eyes) and renders the two real-fly images |
-
-## Regression test
-
-Headless autopilot — the frog must actually eat before the test passes:
+## 8 · Verification
 
 ```bash
-.venv/bin/python main.py --selftest
+.venv/bin/python main.py --selftest      # 1800-frame headless autopilot, asserts ≥ 1 catch
+.venv/bin/python fly_brain.py            # isolated circuit probe: reports GF spike time/distance
 ```
 
 ```
-[selftest] 吃掉=5 跳跃=0 存活=5 神经元果蝇GF逃逸反射=0次
+[selftest] 吃掉=5 跳跃=1 存活=5 神经元果蝇GF逃逸反射=0次
 [selftest] PASS ✓
+t=3.80s 距离=171px → 巨纤维发放，状态=逃逸
 ```
 
-For a quick look at the brain in isolation:
+The selftest drives the frog with a scripted policy under `SDL_VIDEODRIVER=dummy`, so rendering
+and physics are exercised without a display. Frame-cost figures quoted above were measured the
+same way (`Game.draw()` in a 60-iteration loop, warm cache).
 
-```bash
-.venv/bin/python fly_brain.py
-```
+## 9 · Known limitations
 
-## Notes and limitations
-
-- **The UI is in Chinese.** Fonts are auto-detected (macOS system CJK fonts first, then
-  `pygame.font.match_font`), so on Windows or Linux the HUD may fall back to a font without CJK
-  glyphs and show empty boxes. Fix it by adding a CJK `.ttf` path to `FONT_PATHS` in
-  `main.py` (`main.py:38`).
-- **Silent fallback.** Sound is synthesized into numpy buffers and played through
-  `pygame.sndarray`; with no audio device the game still runs, just mute.
-- **The in-game fly is a gameplay model**, not a biophysical one — four hand-tuned LIF circuits
-  reproduce behaviour that is fun to watch and easy to read. For the real thing, see
-  [the NeuroMechFly section](#-the-real-fly-flygym--neuromechfly).
-- **FlyGym 2.1.0 quirk.** Its per-leg ground-contact sensors reference names that do not exist
-  (`unrecognized name ... of sensorized object`), so `real_fly_demo.py` builds the world with
-  `add_ground_contact_sensors=False`. Upstream issue, not one in this repo; contact forces remain
-  available via `get_bodysegment_contact_forces()`.
-- Tested on macOS with Python 3.14 / pygame-ce 2.5.8, and headless in CI-style smoke tests; other
-  platforms should work but are untested.
+- **UI strings are Chinese.** Fonts are resolved from macOS system CJK faces, then
+  `pygame.font.match_font`; on Windows/Linux add a CJK `.ttf` to `FONT_PATHS` (`main.py:39`).
+- **Audio is best-effort.** Effects are synthesized into numpy buffers and played via
+  `pygame.sndarray`; with no audio device the game runs silently.
+- **The game agent is a behavioural model, not a biophysical one** — four hand-tuned LIF circuits
+  chosen for readability and interaction latency. The scientific model is
+  [§5](#5-the-real-fly-flygym--neuromechfly-pipeline).
+- **FlyGym 2.1.0 sensor naming.** Per-leg ground-contact sensors reference element names that do
+  not exist, so `real_fly_demo.py` composes with `add_ground_contact_sensors=False`; contact
+  forces remain available through `get_bodysegment_contact_forces()`. Upstream issue.
+- Verified on macOS (Python 3.14, pygame-ce 2.5.8, MuJoCo 3.9 / FlyGym 2.1.0 on Python 3.12);
+  other platforms are untested.
 
 ## License
 
-[MIT](LICENSE) — do whatever you like, attribution appreciated. The cited projects above belong to
-their own authors and carry their own licenses.
+[MIT](LICENSE). Cited third-party projects and datasets remain under their own licences.
