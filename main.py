@@ -112,7 +112,7 @@ _FOOT_CACHE: dict[tuple[int, bool], pygame.Surface] = {}
 
 # 精灵里"趾尖到脚踝"占整幅高度的比例——场景缩放要按它换算, 否则脚会被算得过大/过小
 TOE_FRAC_HIND, TOE_FRAC_FRONT = 0.42, 0.34
-FOOT_LEN_HIND, FOOT_LEN_FRONT = 22.0, 13.0      # 世界单位：后足≈体长 0.3, 前足≈后足 0.6 倍
+FOOT_LEN_HIND, FOOT_LEN_FRONT = 16.0, 10.0      # 世界单位：后足≈体长 0.22, 前足≈后足 0.6 倍
 
 def build_foot_sprite(size=144, webbed=True, supersample=3):
     """一只俯视的青蛙脚：脚踝在下方中央, 脚趾向上扇开。
@@ -312,26 +312,23 @@ class Frog:
         """
         if hind:
             lx, ly = -9.0 + 2.0 * kick, side * (19.0 + 1.0 * abs(kick))
-            foot_len, toe_frac, spread, bias = FOOT_LEN_HIND, TOE_FRAC_HIND, 1.00, 0.15
+            foot_len, toe_frac, bias = FOOT_LEN_HIND, TOE_FRAC_HIND, 0.15
         else:
             lx, ly = 16.0, side * 11.0
-            foot_len, toe_frac, spread, bias = FOOT_LEN_FRONT, TOE_FRAC_FRONT, 0.62, 0.22
+            foot_len, toe_frac, bias = FOOT_LEN_FRONT, TOE_FRAC_FRONT, 0.22
         ex, ey = rot2(lx, ly, self.heading)
         wx, wy, z = self.pos.x + ex, self.pos.y + ey, self.z + 2.5
         p0 = cam.project(V3(wx, wy, z))
         if p0 is None:
             return
-        out = self.heading + side * spread
-        p1 = cam.project(V3(wx + math.cos(out) * 30.0, wy + math.sin(out) * 30.0, z))
-        if p1 is None:
-            return
         sx, sy, depth = p0
-        theta = math.degrees(math.atan2(p1[1] - sy, p1[0] - sx)) + 90.0   # 精灵朝上
         # 精灵整幅对应的世界长度 = 实际脚长 / 趾尖占比 → 屏上大小正好是这只脚的尺寸
         target = (foot_len / toe_frac) * cam.focal / depth
         if target < 4:
             return
-        img = pygame.transform.rotozoom(foot_sprite(144, hind), theta, target / 144.0)
+        # 不旋转：脚永远是同一个朝向(趾尖朝屏幕上方), 只按景深缩放, 避免脚"拧来拧去"
+        px = max(4, int(target))
+        img = pygame.transform.smoothscale(foot_sprite(144, hind), (px, px))
         rect = img.get_rect()
         rect.center = (int(sx), int(sy))            # 图心 = 脚踝, 直接以投影点为中心
         # 放在 BANK 层(3): 永远在身体(4)之下, 但可以和荷叶按深度正确互遮
