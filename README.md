@@ -7,7 +7,11 @@ scripted NPCs — the ninth is driven by a **spiking neural network** and visibl
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-![Fly Pond 3D](docs/images/preview.png)
+![The gold-outlined neural fly, with its GF / CX / REST activation panel open on the right](docs/images/neural-fly.png)
+
+*The gold-outlined fly is the only one driven by a spiking network. Press `B` and the panel on the
+right shows each circuit charging toward threshold in real time — here the frog has walked inside
+GF's 170-unit escape radius and the giant-fibre bar is almost full.*
 
 Built with nothing but `pygame` and `numpy` — no OpenGL, no engine, no assets.
 Every polygon is projected, depth-sorted and drawn by hand in `render3d.py`.
@@ -85,6 +89,8 @@ Crumbs grow on random lily pads. Flies smell them, hover, and then land to chew 
 a pad's crumb shrinks and disappears when eaten, and a new one sprouts on some pad
 8–14 s later. A fly that is busy feeding or grooming is **not** watching you, which
 is exactly when to flick your tongue.
+
+![Wider view of the pond: lily pads, lotus flowers, banks and flies](docs/images/preview.png)
 
 ## How the 3D works
 
