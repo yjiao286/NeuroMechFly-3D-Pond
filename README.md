@@ -8,6 +8,10 @@ integrate-and-fire network: giant-fibre escape, central-complex steering, and a 
 that gates feeding. Press `B` and you can watch its membrane potentials charge toward threshold
 while you close in on it.
 
+And because a cartoon shouldn't be the only fly in the pond, this repo also assembles and renders
+**NeuroMechFly** — the real, micro-CT-scanned *Drosophila* neuromechanical model from EPFL's
+FlyGym.
+
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![pygame-ce](https://img.shields.io/badge/pygame--ce-2.5-6cbf4a)
 ![renderer](https://img.shields.io/badge/3D%20renderer-hand--written-2f6f5f)
@@ -16,11 +20,13 @@ while you close in on it.
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-![The gold-outlined neural fly, with its GF / CX / REST activation panel open on the right](docs/images/neural-fly.png)
+![NeuroMechFly: the real fruit fly model, composed from micro-CT meshes and rendered in MuJoCo](docs/images/neuromechfly.png)
 
-*The gold-outlined fly is the only one driven by a spiking network. The panel on the right is
-its four circuits charging toward threshold in real time — here the frog has walked inside GF's
-170-unit escape radius and the giant-fibre bar is almost full.*
+*This is not a sprite. `real_fly_demo.py` builds the **real** fly — 70 body segments, 126 joint
+DOF, six adhesion actuators in the feet and two compound-eye cameras — from the micro-CT meshes
+that ship with FlyGym, and renders it offscreen in MuJoCo. Mechanics and neuro interfaces are in
+[The real fly](#-the-real-fly-flygym--neuromechfly); the game's own spiking fly is
+[the individual](#the-individual--神经元个体).*
 
 ---
 
@@ -41,6 +47,12 @@ Every fly in the pond flies, walks, feeds and grooms. One of them also *decides*
 ([`fly_brain.py`](fly_brain.py)) is a small spiking network of leaky integrate-and-fire neurons,
 integrated with sub-stepping every frame — and it is not decoration: the fly does nothing until
 a circuit fires.
+
+![The gold-outlined neural fly, with its GF / CX / REST activation panel open on the right](docs/images/neural-fly.png)
+
+*The gold-outlined fly is the only one driven by a spiking network. The panel on the right shows
+its four circuits charging toward threshold in real time — here the frog has walked inside GF's
+170-unit escape radius and the giant-fibre bar is almost full.*
 
 | Circuit | Role | Tau | Fires when |
 |---|---|---|---|
@@ -92,12 +104,10 @@ compound-eye readout. Going from the 4-neuron cartoon to the scientific model is
 
 ## 🧬 The real fly: FlyGym / NeuroMechFly
 
-The model below is **not a game asset**. It is assembled by
-[`real_fly_demo.py`](real_fly_demo.py) from the micro-CT meshes shipped with
-[FlyGym](https://neuromechfly.org), the EPFL platform for embodied *Drosophila* sensorimotor
-research, and rendered offscreen in MuJoCo.
-
-![NeuroMechFly: the real fruit fly model, composed and rendered with MuJoCo](docs/images/neuromechfly.png)
+The render at the [top of this page](#-fly-brain-pond-3d-) is **not a game asset**. It is assembled
+by [`real_fly_demo.py`](real_fly_demo.py) from the micro-CT meshes shipped with
+[FlyGym](https://neuromechfly.org) — the EPFL platform for embodied *Drosophila* sensorimotor
+research — and rendered offscreen in MuJoCo.
 
 ### Mechanics — a fly you can push, pull and grip with
 
@@ -170,8 +180,8 @@ OpenGL, no assets: every polygon is projected, depth-sorted and drawn by hand in
 [`render3d.py`](render3d.py).
 
 ```bash
-git clone https://github.com/yjiao286/fly-brain-pond.git
-cd fly-brain-pond
+git clone https://github.com/yjiao286/neuro-pond.git
+cd neuro-pond
 
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt   # Windows: .venv\Scripts\pip
@@ -218,6 +228,26 @@ drawing circles over the eyes for 1.2 s — the real *Drosophila* cleaning behav
 Everything lives in [`render3d.py`](render3d.py): a `Camera3D` doing perspective projection with a
 yaw/pitch orbit rig, a `Painter` collecting polygons, and primitives (`flat_polygon`, `sphere`,
 `segment`, `polyline`, `ellipse_pts`) with near-plane clipping.
+
+On top of that sits a small procedural **material system**, because "hand-written renderer" does
+not have to mean flat colour:
+
+- **One key light for the whole scene** (`LIGHT_XY`): every sphere and dome shades toward the same
+  world-space sun, so highlights stay consistent while the camera orbits.
+- **`sphere()`** draws a rim-darkened base with progressively inset, light-shifted layers, then a
+  specular dot and a thin outline — this is what turns bushes, rocks, eyes and crumbs from flat
+  discs into lit volumes.
+- **`dome()`** does the same for flat-ish bodies (frog back, head, lily pads, pebbles): edge
+  darkening → inset highlight → sheen.
+- **`soft_shadow()`** blits a cached radial-falloff sprite scaled to the projected ellipse, so
+  shadows are soft instead of hard polygons.
+- **Water** is three layers — a smooth north–south atmosphere gradient, drifting ripple dashes and
+  a caustic sparkle field. **Lily pads** get radial veins, a lifted near-edge rim and a leaf
+  underside; the **meadow** fades into haze with scattered tufts; the sky carries a warm horizon
+  glow and drifting clouds.
+- Static scenery (walls, meadow, pebbles, rocks, bushes) is rendered once into a cached offscreen
+  layer keyed by the camera rig, so a full-pond view costs about **18 ms per frame in software
+  rendering**, with the swaying reeds and grass still live.
 
 Naive painter's-algorithm sorting breaks the moment a small creature stands on the far half of a
 huge ground polygon — the ground wins the sort and swallows the creature. Fly Brain Pond 3D

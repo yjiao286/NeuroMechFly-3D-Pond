@@ -1,6 +1,8 @@
-"""3D 池塘场景：水面、焦散闪点、涟漪、荷叶荷花、食饵、沙岸/岩石/草丛/芦苇/灌木与天空。
+"""3D 池塘场景：水面、焦散、涟漪、荷叶荷花、食饵、沙岸/岩石/草丛/芦苇/灌木与天空。
 
-层间用微小深度偏置(bias)防穿模：同一物体各层显式错开排序。
+视觉做法：所有平面物都带"受光"层次（边缘压暗 → 向光面提亮 → 高光/镜面），
+水面用低频涌浪 + 高频纹样 + 焦散三层叠加，落地物一律带柔光阴影。
+层间仍用微小深度偏置(bias)防穿模：同一物体各层显式错开排序。
 """
 
 from __future__ import annotations
@@ -10,15 +12,104 @@ import random
 
 import pygame
 
-from render3d import V3, clamp, flat_polygon, polyline, segment, sphere
+from render3d import (LIGHT_XY, V3, add_light, clamp, dome, flat_polygon, mix,
+                      polyline, segment, shade, soft_shadow, sphere)
 
 POND_W2, POND_H2 = 620, 350          # 池塘半宽 / 半高（世界单位）
-WATER_S = (34, 82, 68)               # 近岸水色（南）
-WATER_N = (108, 148, 136)            # 远岸水色（北，大气雾化）
-SAND = (198, 180, 142)
-SAND_D = (168, 148, 112)
+WATER_S = (30, 76, 66)               # 近岸水色（南）
+WATER_M = (52, 104, 92)              # 中段
+WATER_N = (116, 156, 146)            # 远岸水色（北，大气雾化）
+GLINT = (226, 240, 232)              # 水面高光
+FOAM = (206, 226, 214)               # 岸边泡沫
+SAND = (204, 184, 146)
+SAND_WET = (150, 128, 96)            # 水线附近的湿沙
+SAND_TOP = (222, 204, 168)
+MEADOW = (96, 132, 66)
 BANK_H = 18                          # 岸高
 PAD_TOP = 2.2                        # 荷叶叶面高度
+
+
+def _lerp_color(a, b, f):
+    return tuple(int(a[k] + (b[k] - a[k]) * f) for k in range(3))
+
+
+def _hash01(i, j, k=0):
+    """确定性伪随机(0~1)，用于给水面/沙面加纹样，不随帧抖动。"""
+    n = (int(i) * 73856093) ^ (int(j) * 19349663) ^ (int(k) * 83492791)
+    n &= 0xFFFFFFFF
+    n = (n ^ (n >> 13)) * 1274126177 & 0xFFFFFFFF
+    return ((n ^ (n >> 16)) & 0xFFFF) / 65535.0
+
+
+_CLOUD_CACHE = {}
+
+
+def _cloud_sprite(blobs=6, size=128):
+    """预生成一朵柔边云(SRCALPHA 贴图)，避免每帧算羽化。"""
+    key = (blobs, size)
+    surf = _CLOUD_CACHE.get(key)
+    if surf is None:
+        surf = pygame.Surface((size, size), pygame.SRCALPHA)
+        for i in range(blobs):
+            f = (i + 0.5) / blobs
+            cx = size * (0.18 + 0.64 * f)
+            cy = size * (0.60 - 0.20 * math.sin(f * math.pi))
+            r = size * (0.16 + 0.12 * math.sin(f * 2.4))
+            for k in range(4, 0, -1):
+                a = int(52 * (1 - k / 5.0) + 12)
+                pygame.draw.circle(surf, (255, 255, 255, a),
+                                   (int(cx), int(cy)), int(r * k / 4), 0)
+        _CLOUD_CACHE[key] = surf
+    return surf
+
+
+_CLOUDS = [(2.1, 900, 6200, 6), (3.4, 1350, 8200, 8), (4.6, 700, 5400, 5),
+           (0.7, 1500, 7000, 9), (5.6, 1050, 6600, 6), (1.4, 1750, 9000, 7),
+           (5.0, 820, 5800, 5), (2.9, 1200, 7600, 8)]
+
+
+def draw_sky(surf, cam, t):
+    """天空：天顶冷色 → 地平线暖光的渐变 + 太阳辉光 + 缓慢飘动的云。"""
+    hor = cam.project(cam.pos + cam.fwd * 3000)
+    if hor is None:
+        return
+    hy = clamp(int(hor[1]), 0, surf.get_height())
+    bands = 20
+    for i in range(bands):
+        f = i / (bands - 1)
+        col = mix((92, 126, 158), (214, 216, 190), f ** 1.35)
+        col = mix(col, (236, 222, 186), max(0.0, f - 0.72) * 2.4)
+        y0 = int(hy * i / bands)
+        y1 = int(hy * (i + 1) / bands) + 1
+        pygame.draw.rect(surf, col, (0, y0, surf.get_width(), y1 - y0))
+    pygame.draw.rect(surf, (12, 40, 38), (0, hy, surf.get_width(), surf.get_height() - hy))
+    # 太阳辉光：沿主光方向在地平线附近洒一层暖光
+    sun = cam.project(V3(LIGHT_XY[0] * 2400, LIGHT_XY[1] * 2400, 620))
+    if sun and sun[1] < hy + 60:
+        glow = _cloud_sprite(4, 96)
+        for k, alpha in ((7.0, 26), (3.6, 34), (1.6, 46)):
+            r = int(90 * k / 4)
+            img = pygame.transform.smoothscale(glow, (r * 2, r * 2))
+            img.set_alpha(alpha)
+            surf.blit(img, (int(sun[0] - r), int(sun[1] - r - 20)))
+    for (ang, height, radius, blobs) in _CLOUDS:
+        drift = t * 22.0
+        wx = math.cos(ang) * radius + drift
+        wy = math.sin(ang) * radius * 0.6
+        p = cam.project(V3(wx, wy, height))
+        if p is None:
+            continue
+        sx, sy, depth = p
+        if not (-200 < sx < surf.get_width() + 200 and -120 < sy < hy + 40):
+            continue
+        w = cam.screen_radius(radius * 0.45, depth) * 2.0
+        h = w * 0.42
+        if w < 8:
+            continue
+        img = pygame.transform.smoothscale(_cloud_sprite(blobs, 128),
+                                           (max(8, int(w)), max(8, int(h))))
+        img.set_alpha(150)
+        surf.blit(img, (int(sx - w / 2), int(sy - h / 2)))
 
 
 def caustic(x, y, t):
@@ -33,37 +124,79 @@ def np_sin_mix(x, y):
     return math.sin(y * 0.009 - x * 0.005)
 
 
-def _lerp_color(a, b, f):
-    return tuple(int(a[k] + (b[k] - a[k]) * f) for k in range(3))
+def water_color(x, y, t):
+    """水面底色：南北大气渐变 + 极缓的涌浪。
+
+    刻意不引入高频项——底色按大格绘制，格内是纯色，只有低频变化才不会露出格子接缝；
+    高频的水纹交给上面那层小碎块与焦散闪点。"""
+    f = (y + POND_H2) / (2 * POND_H2)
+    base = _lerp_color(WATER_S, WATER_M, f * 2.0) if f < 0.5 \
+        else _lerp_color(WATER_M, WATER_N, (f - 0.5) * 2.0)
+    swell = math.sin(x * 0.0042 + t * 0.21) * math.sin(y * 0.0051 - t * 0.17)
+    return mix(base, GLINT, 0.022 * swell + 0.010)
 
 
 def draw_pond(painter, cam, t):
-    """水面（近深远浅的大气层次）+ 泥岸 + 流动的焦散闪点。"""
-    rows = 26
+    """水面（大气渐变 + 涌浪 + 细纹）+ 焦散 + 岸边泡沫。"""
+    # 底色只随 y 缓慢变化 → 行分得细(梯度平滑)、列分得粗(横向几乎不变), 既没有接缝也不贵
+    rows, cols = 40, 8
     for i in range(rows):
         y0 = -POND_H2 + 2 * POND_H2 * i / rows
         y1 = -POND_H2 + 2 * POND_H2 * (i + 1) / rows
-        f = (y0 + POND_H2) / (2 * POND_H2)
-        pts = [V3(-POND_W2, y0, 0), V3(POND_W2, y0, 0), V3(POND_W2, y1, 0), V3(-POND_W2, y1, 0)]
-        flat_polygon(painter, cam, pts, _lerp_color(WATER_S, WATER_N, f), layer=0)
-    for gx in range(40):                                  # 焦散闪点：小而淡, 避免悬浮感
-        for gy in range(26):
-            x = -POND_W2 + 1240 * gx / 39
-            y = -POND_H2 + 700 * gy / 25
+        for j in range(cols):
+            x0 = -POND_W2 + 2 * POND_W2 * j / cols
+            x1 = -POND_W2 + 2 * POND_W2 * (j + 1) / cols
+            flat_polygon(painter, cam,
+                         [V3(x0, y0, 0), V3(x1, y0, 0), V3(x1, y1, 0), V3(x0, y1, 0)],
+                         water_color((x0 + x1) / 2, (y0 + y1) / 2, t), layer=0)
+    # 高频水纹：短横划(读作水面细波), 比统一网格细, 不会出现方块接缝
+    for gi in range(24):
+        for gj in range(16):
+            r1 = _hash01(gi, gj, 3)
+            if r1 < 0.46:
+                continue
+            x = -POND_W2 + 1240 * (gi + _hash01(gi, gj, 11)) / 24
+            y = -POND_H2 + 700 * (gj + _hash01(gi, gj, 12)) / 16
+            s = 4.0 + 7.0 * _hash01(gi, gj, 13)
+            a = (_hash01(gi, gj, 14) - 0.5) * 0.55        # 大体沿水面横向
+            bright = _hash01(gi, gj, 15) > 0.5
+            col = mix(water_color(x, y, t), GLINT if bright else (8, 30, 28),
+                      0.05 + 0.07 * (r1 - 0.46) / 0.54)
+            dx, dy = math.cos(a) * s, math.sin(a) * s * 0.30
+            flat_polygon(painter, cam,
+                         [V3(x - dx, y - dy, 0.06), V3(x + dx, y + dy, 0.06),
+                          V3(x + dx, y + dy + 0.9, 0.06), V3(x - dx, y - dy + 0.9, 0.06)],
+                         col, layer=1)
+    for gx in range(36):                                  # 焦散闪点：小而淡, 避免悬浮感
+        for gy in range(24):
+            x = -POND_W2 + 1240 * gx / 35
+            y = -POND_H2 + 700 * gy / 23
             c = caustic(x, y, t)
-            if c > 0.68:
-                k = int(38 + 66 * (c - 0.68) / 0.32)
-                s = 2.2 + 2.2 * (c - 0.68)
+            if c > 0.70:
+                k = int(30 + 78 * (c - 0.70) / 0.30)
+                s = 2.6 + 2.8 * (c - 0.70)
                 a = t * 0.6 + x * 0.01
-                pts = [V3(x + s * math.cos(a), y + s * math.sin(a), 0.15),
-                       V3(x - s * math.sin(a), y + s * math.cos(a), 0.15),
-                       V3(x - s * math.cos(a), y - s * math.sin(a), 0.15),
-                       V3(x + s * math.sin(a), y - s * math.cos(a), 0.15)]
-                flat_polygon(painter, cam, pts, (int(k * 0.5), k, int(k * 0.8)), layer=1)
+                pts = [V3(x + s * math.cos(a), y + s * math.sin(a), 0.16),
+                       V3(x - s * math.sin(a), y + s * math.cos(a), 0.16),
+                       V3(x - s * math.cos(a), y - s * math.sin(a), 0.16),
+                       V3(x + s * math.sin(a), y - s * math.cos(a), 0.16)]
+                flat_polygon(painter, cam, pts, (int(k * 0.55), k, int(k * 0.8)), layer=1)
+    # 岸边泡沫：贴着四壁的一圈浅色水线，给池塘收个边
+    band = 13
+    for pts in ([V3(-POND_W2, POND_H2 - band, 0.2), V3(POND_W2, POND_H2 - band, 0.2),
+                 V3(POND_W2, POND_H2, 0.2), V3(-POND_W2, POND_H2, 0.2)],
+                [V3(-POND_W2, -POND_H2, 0.2), V3(POND_W2, -POND_H2, 0.2),
+                 V3(POND_W2, -POND_H2 + band, 0.2), V3(-POND_W2, -POND_H2 + band, 0.2)]):
+        flat_polygon(painter, cam, pts, mix(FOAM, WATER_S, 0.55), layer=1)
+    for pts in ([V3(-POND_W2, -POND_H2, 0.2), V3(-POND_W2 + band, -POND_H2, 0.2),
+                 V3(-POND_W2 + band, POND_H2, 0.2), V3(-POND_W2, POND_H2, 0.2)],
+                [V3(POND_W2 - band, -POND_H2, 0.2), V3(POND_W2, -POND_H2, 0.2),
+                 V3(POND_W2, POND_H2, 0.2), V3(POND_W2 - band, POND_H2, 0.2)]):
+        flat_polygon(painter, cam, pts, mix(FOAM, WATER_S, 0.62), layer=1)
 
 
 class Ripples:
-    """扩散涟漪：3D 水面上的圆环。"""
+    """扩散涟漪：3D 水面上的圆环（外圈淡、内圈亮，带一点高光）。"""
 
     def __init__(self):
         self.items = []
@@ -92,15 +225,20 @@ class Ripples:
             if it["delay"] > 0:
                 continue
             k = max(0.0, min(1.0, it["life"] * min(1.0, it["strength"] + 0.3)))
-            c = (int(40 + 165 * k), int(90 + 150 * k), int(84 + 136 * k))
-            pts = [V3(it["pos"].x + it["r"] * math.cos(a),
-                      it["pos"].y + it["r"] * math.sin(a), 0.8)
-                   for a in [2 * math.pi * i / 20 for i in range(21)]]
-            polyline(painter, cam, pts, c, 2 if k > 0.5 else 1, layer=1)
+            ring = [V3(it["pos"].x + it["r"] * math.cos(a),
+                       it["pos"].y + it["r"] * math.sin(a), 0.8)
+                    for a in [2 * math.pi * i / 22 for i in range(23)]]
+            polyline(painter, cam, ring, mix(shade(FOAM, 0.55), FOAM, k),
+                     2 if k > 0.5 else 1, layer=1)
+            if k > 0.35:                                   # 内圈暗一档, 涟漪才有"厚度"
+                inner = [V3(it["pos"].x + (it["r"] - 3) * math.cos(a),
+                            it["pos"].y + (it["r"] - 3) * math.sin(a), 0.74)
+                         for a in [2 * math.pi * i / 18 for i in range(19)]]
+                polyline(painter, cam, inner, mix(WATER_S, GLINT, 0.25 * k), 1, layer=1)
 
 
 class LilyPad3D:
-    """荷叶：缺口圆叶 + 叶脉，随水波起伏；偶尔开一朵多层荷花。
+    """荷叶：带缺口的圆叶, 叶面做受光渐变 + 放射叶脉 + 镜面高光, 随水波起伏。
     叶影/叶面/内层/叶脉各层高度与 bias 显式错开防穿模。"""
 
     def __init__(self, pos, r, with_flower=False):
@@ -109,9 +247,11 @@ class LilyPad3D:
         self.phase = random.uniform(0, math.tau)
         self.notch = random.uniform(0, math.tau)
         self.flower = with_flower
+        self.tone = random.uniform(0.90, 1.12)                  # 每片叶子的个体色差
         self.marks = [(random.uniform(0, math.tau), random.uniform(0.2, 0.75),
                        random.uniform(1.5, 3.2), random.random() < 0.5)
-                      for _ in range(7)]                    # 叶面斑纹(预生成防抖动)
+                      for _ in range(7)]                        # 叶面斑纹(预生成防抖动)
+        self.veins = [random.uniform(-0.28, 0.28) for _ in range(7)]
 
     def leaf_pts(self, z, scale=1.0):
         pts = [V3(self.pos.x, self.pos.y, z)]
@@ -136,26 +276,44 @@ class LilyPad3D:
     def draw(self, painter, cam, t):
         bob = math.sin(t * 1.2 + self.phase) * 1.6
         z = PAD_TOP + bob
-        # 影子强制后置(bias=-4): 无论机位转到哪个方位, 影子都不会盖到叶面上
-        shadow = [V3(p.x + 2, p.y + 2, 0.3) for p in self.leaf_pts(z, 0.92)]
-        flat_polygon(painter, cam, shadow, (10, 36, 30), bias=-4, layer=3)
-        # 叶面/内层/叶脉全部同层绘制, 仅用 bias 排序——高视角下不会错位戳出叶缘
-        flat_polygon(painter, cam, self.leaf_pts(z), (58, 120, 62), (40, 88, 48), 2, layer=3)
-        flat_polygon(painter, cam, self.leaf_pts(z, 0.86), (74, 140, 70), bias=0.5, layer=3)
-        # 叶面斑纹
-        for (ma, md, mr, dark) in self.marks:
+        base = shade((62, 126, 66), self.tone)
+        # 柔光叶影(投影在叶面下方的水面上)
+        soft_shadow(painter, cam, V3(self.pos.x + 4, self.pos.y + 5, 0.25),
+                    self.r * 1.12, self.r * 1.02, 1.0, bias=-4, layer=3)
+        # 叶缘厚度：略大一圈的深色叶子垫在下面, 露出一点点边
+        flat_polygon(painter, cam, [V3(p.x + 1.6, p.y + 2.0, p.z - 0.35)
+                                    for p in self.leaf_pts(z, 1.045)],
+                     shade(base, 0.52), bias=-1.5, layer=3)
+        dome(painter, cam, self.leaf_pts(z), base, bias=-1.0, layer=3,
+             outline=shade(base, 0.62), owidth=2, sheen=0.30)
+        flat_polygon(painter, cam, self.leaf_pts(z, 0.86), add_light(base, 0.10),
+                     bias=0.5, layer=3)
+        # 叶脉：由叶心向叶缘放射, 越靠边越淡
+        for idx, a in enumerate(self.veins):
+            ang = self.notch + 0.75 + idx * (2 * math.pi - 1.5) / 6.7
+            mid = V3(self.pos.x + math.cos(ang) * self.r * 0.45,
+                     self.pos.y + math.sin(ang) * self.r * 0.41, z + 0.05)
+            tip = V3(self.pos.x + math.cos(ang) * self.r * 0.80,
+                     self.pos.y + math.sin(ang) * self.r * 0.73, z + 0.05)
+            segment(painter, cam, V3(self.pos.x, self.pos.y, z + 0.1), mid,
+                    mix(base, (168, 214, 132), 0.32), 2, bias=0.6, layer=3)
+            segment(painter, cam, mid, tip, mix(base, (150, 200, 120), 0.18), 1,
+                    bias=0.6, layer=3)
+        for (ma, md, mr, dark) in self.marks:                    # 叶面斑纹
             px = self.pos.x + math.cos(ma) * self.r * md
             py = self.pos.y + math.sin(ma) * self.r * 0.86 * md
-            col = (52, 106, 52) if dark else (88, 150, 78)
+            col = mix(base, (36, 78, 40), 0.55) if dark else mix(base, (150, 206, 122), 0.45)
             flat_polygon(painter, cam,
-                         [V3(px + math.cos(a) * mr, py + math.sin(a) * mr * 0.8, z + 0.1)
+                         [V3(px + math.cos(a) * mr, py + math.sin(a) * mr * 0.8, z + 0.12)
                           for a in [2 * math.pi * i / 6 for i in range(6)]],
-                         col, bias=0.3, layer=3)
-        for k in range(6):
-            a = self.notch + 0.9 + k * (2 * math.pi - 1.8) / 5
-            tip = V3(self.pos.x + math.cos(a) * self.r * 0.8,
-                     self.pos.y + math.sin(a) * self.r * 0.74, z)
-            segment(painter, cam, V3(self.pos.x, self.pos.y, z), tip, (42, 90, 48), 2, bias=0.6, layer=3)
+                         col, bias=0.35, layer=3)
+        # 近岸一侧的叶缘高光：让叶子"翻"起来一点点
+        rim = []
+        for i in range(9):
+            a = self.notch + 2.2 + i * 0.24
+            rim.append(V3(self.pos.x + math.cos(a) * self.r * 0.99,
+                          self.pos.y + math.sin(a) * self.r * 0.91, z + 0.14))
+        polyline(painter, cam, rim, mix(base, (198, 232, 160), 0.55), 2, layer=3)
         if self.flower:
             self._draw_flower(painter, cam, z)
 
@@ -164,7 +322,7 @@ class LilyPad3D:
         cx, cy = self.pos
         sway = math.sin(self.phase) * 0.06
 
-        def petal(a, r_in, r_tip, w, z_tip, col):
+        def petal(a, r_in, r_tip, w, z_tip, col, tip_col):
             cta, sta = math.cos(a), math.sin(a)
             bl = V3(cx + cta * r_in - sta * w, cy + sta * r_in + cta * w, z + 2.8)
             br = V3(cx + cta * r_in + sta * w, cy + sta * r_in - cta * w, z + 2.8)
@@ -174,13 +332,16 @@ class LilyPad3D:
                     cy + sta * r_tip * 0.82 - cta * w * 0.55, z + z_tip)
             tip = V3(cx + cta * r_tip, cy + sta * r_tip, z + z_tip * 0.82)
             flat_polygon(painter, cam, [bl, tl, tip, tr, br], col, bias=0.35, layer=3)
+            flat_polygon(painter, cam,
+                         [tl, tip, tr, V3((tl.x + tr.x) / 2, (tl.y + tr.y) / 2, z + z_tip * 0.6)],
+                         tip_col, bias=0.42, layer=3)
 
         for i in range(8):                                    # 外层大花瓣: 粉尖
             a = 2 * math.pi * i / 8 + self.phase + sway
-            petal(a, 2.5, 12.5, 2.2, 8.2, (240, 158, 196))
+            petal(a, 2.5, 12.5, 2.2, 8.2, (238, 166, 202), (250, 196, 220))
         for i in range(6):                                    # 内层花瓣: 更立更浅
             a = 2 * math.pi * i / 6 + self.phase * 1.3 + 0.3
-            petal(a, 1.6, 8.0, 1.8, 9.6, (248, 190, 218))
+            petal(a, 1.6, 8.0, 1.8, 9.6, (250, 196, 224), (255, 224, 238))
         sphere(painter, cam, V3(cx, cy, z + 7.0), 3.1, (246, 212, 96), bias=0.4, layer=3)
         for i in range(6):                                    # 花蕊
             a = 2 * math.pi * i / 6 + 0.4
@@ -197,6 +358,7 @@ class FoodCrumb:
         self.timer = random.uniform(0.5, 3.0)
         self.offset = pygame.math.Vector2(0, 0)
         self.crowd = 0
+        self.seed_off = random.uniform(0, 6.28)
         self.respawn()
 
     def respawn(self):
@@ -222,11 +384,15 @@ class FoodCrumb:
             return
         s = 0.45 + 0.55 * self.amount / 4.0
         cx, cy = self.pos()
-        for dx, dy in ((0, 0), (3, 2), (-3, 1.5), (1, -3)):
-            sphere(painter, cam, V3(cx + dx * s, cy + dy * s, PAD_TOP + 1.2), 2.1 * s,
-                   (156, 110, 64), bias=0.2, layer=3)
-        sphere(painter, cam, V3(cx - 1.5 * s, cy - 1.5 * s, PAD_TOP + 2.0), 1.1 * s,
-               (206, 158, 104), bias=0.25, layer=3)
+        soft_shadow(painter, cam, V3(cx + 1, cy + 1, PAD_TOP + 0.9), 5.0 * s, 3.6 * s,
+                    0.55, bias=0.05, layer=3)
+        grains = ((0, 0, 2.3, (162, 116, 68)), (3, 2, 1.9, (146, 100, 58)),
+                  (-3, 1.5, 1.8, (172, 128, 78)), (1, -3, 1.7, (154, 108, 62)))
+        for dx, dy, rr, col in grains:
+            sphere(painter, cam, V3(cx + dx * s, cy + dy * s, PAD_TOP + 1.2), rr * s,
+                   col, bias=0.2, layer=3)
+        sphere(painter, cam, V3(cx - 1.5 * s, cy - 1.5 * s, PAD_TOP + 2.1), 1.2 * s,
+               (214, 170, 116), bias=0.25, layer=3)
 
 
 def make_pads(n=6):
@@ -247,7 +413,7 @@ def make_duckweed(n=14):
         x = random.uniform(-POND_W2 + 40, POND_W2 - 40)
         y = random.uniform(-POND_H2 + 40, POND_H2 - 40)
         dots = [(random.uniform(-4.5, 4.5), random.uniform(-4.5, 4.5),
-                 random.uniform(0.9, 2.0)) for _ in range(random.randint(3, 6))]
+                 random.uniform(0.9, 2.0), random.uniform(0, math.tau)) for _ in range(random.randint(3, 6))]
         clusters.append({"x": x, "y": y, "dots": dots, "phase": random.uniform(0, math.tau)})
     return clusters
 
@@ -255,31 +421,38 @@ def make_duckweed(n=14):
 def draw_duckweed(painter, cam, t, clusters):
     for cl in clusters:
         drift = math.sin(t * 0.22 + cl["phase"]) * 3.0
-        for dx, dy, r in cl["dots"]:
+        for dx, dy, r, rot in cl["dots"]:
             px, py = cl["x"] + dx + drift, cl["y"] + dy
-            pts = [V3(px + math.cos(a) * r, py + math.sin(a) * r * 0.85, 0.25)
-                   for a in [2 * math.pi * i / 6 for i in range(6)]]
-            col = (118, 184, 88) if (dx + dy) > 0 else (96, 160, 76)
-            flat_polygon(painter, cam, pts, col, layer=1)
+            top = (120, 186, 90) if (dx + dy) > 0 else (98, 164, 78)
+            flat_polygon(painter, cam,
+                         [V3(px + math.cos(rot + a) * r * 1.15,
+                             py + math.sin(rot + a) * r * 0.95, 0.18)
+                          for a in [2 * math.pi * i / 7 for i in range(7)]],
+                         shade(top, 0.72), bias=-0.2, layer=1)
+            flat_polygon(painter, cam,
+                         [V3(px + math.cos(rot + a) * r, py + math.sin(rot + a) * r * 0.85, 0.26)
+                          for a in [2 * math.pi * i / 7 for i in range(7)]],
+                         top, bias=0.2, layer=1)
 
 
 def make_bank_props():
-    """岸边一次性布景：岩石、草丛、芦苇香蒲、灌木丛。"""
+    """岸边一次性布景：岩石、草丛、芦苇香蒲、灌木丛、沙面卵石。"""
     rng = random.Random(20)
-    rocks, grass, reeds, bushes = [], [], [], []
+    rocks, grass, reeds, bushes, pebbles = [], [], [], [], []
     for x in range(-560, 561, 95):                        # 远岸岩石与灌木
-        rocks.append((x + rng.uniform(-24, 24), POND_H2 - 4, rng.uniform(6, 13)))
+        rocks.append((x + rng.uniform(-24, 24), POND_H2 - 4, rng.uniform(6, 13),
+                      rng.choice(((158, 150, 132), (140, 134, 122), (170, 160, 138)))))
     for x in range(-520, 521, 78):
         bushes.append((x + rng.uniform(-24, 24), POND_H2 + 28 + rng.uniform(-14, 22),
                        rng.uniform(30, 60), rng.choice(((74, 110, 60), (86, 122, 66), (66, 100, 56)))))
     for y in range(-240, 241, 130):                       # 两岸各几丛
         bushes.append((-(POND_W2 + 40), y, rng.uniform(26, 42), (78, 114, 62)))
         bushes.append((POND_W2 + 40, y + 60, rng.uniform(26, 42), (70, 106, 58)))
-        rocks.append((-(POND_W2 - 4), y, rng.uniform(6, 11)))
-        rocks.append((POND_W2 - 4, y + 50, rng.uniform(6, 11)))
+        rocks.append((-(POND_W2 - 4), y, rng.uniform(6, 11), (152, 146, 130)))
+        rocks.append((POND_W2 - 4, y + 50, rng.uniform(6, 11), (162, 154, 136)))
     for x in range(-590, 591, 22):                        # 远岸芦苇（密）
-        reeds.append((x + rng.uniform(-8, 8), POND_H2 - 10 + rng.uniform(-6, 6),
-                      rng.uniform(55, 112), rng.random() < 0.45, rng.uniform(0, math.tau)))
+        reeds.append((x + rng.uniform(-8, 8), POND_H2 + 3 + rng.uniform(-3, 5),
+                      rng.uniform(52, 104), rng.random() < 0.30, rng.uniform(0, math.tau)))
     for y in range(-300, 301, 52):                        # 两侧较密
         reeds.append((-(POND_W2 - 8) + rng.uniform(-5, 5), y, rng.uniform(46, 84),
                       rng.random() < 0.35, rng.uniform(0, math.tau)))
@@ -294,24 +467,72 @@ def make_bank_props():
         else:
             pos = (POND_W2 - 2, rng.uniform(-POND_H2, POND_H2))
         grass.append((pos, rng.uniform(12, 24), rng.uniform(0, math.tau)))
-    return {"rocks": rocks, "grass": grass, "reeds": reeds, "bushes": bushes}
+    rim = 44
+    for _ in range(64):                                   # 岸顶散落的卵石(沙面纹理)
+        side = rng.randrange(4)
+        if side == 0:
+            pebbles.append((rng.uniform(-POND_W2 - rim, POND_W2 + rim),
+                            POND_H2 + rng.uniform(2, rim - 4), rng.uniform(1.4, 3.4)))
+        elif side == 1:
+            pebbles.append((rng.uniform(-POND_W2 - rim, POND_W2 + rim),
+                            -POND_H2 - rng.uniform(2, rim - 4), rng.uniform(1.4, 3.4)))
+        elif side == 2:
+            pebbles.append((-(POND_W2 + rng.uniform(2, rim - 4)),
+                            rng.uniform(-POND_H2, POND_H2), rng.uniform(1.4, 3.4)))
+        else:
+            pebbles.append((POND_W2 + rng.uniform(2, rim - 4),
+                            rng.uniform(-POND_H2, POND_H2), rng.uniform(1.4, 3.4)))
+    return {"rocks": rocks, "grass": grass, "reeds": reeds, "bushes": bushes,
+            "pebbles": pebbles}
+
+
+def _sand_color(x, z):
+    f = clamp(z / BANK_H, 0.0, 1.0)
+    base = mix(SAND_WET, SAND, clamp(f * 1.5, 0, 1))
+    base = mix(base, SAND_TOP, clamp((f - 0.6) * 2.2, 0, 1))
+    grain = (_hash01(x // 18, z // 6, 7) - 0.5) * 0.10
+    return mix(base, (255, 250, 240) if grain > 0 else (110, 92, 66), abs(grain))
 
 
 def draw_banks(painter, cam, t, props):
     """四面沙岸堤壁 + 岸顶 + 岩石/草丛/芦苇/灌木。"""
+    draw_bank_base(painter, cam, props)
+    draw_bank_plants(painter, cam, t, props)
+
+
+def draw_bank_base(painter, cam, props):
+    """岸上不随时间变化的部分：堤壁、草地、卵石、岩石、灌木。
+
+    这部分只跟机位有关，主循环会把它缓存成一张离屏贴图，机位不动时直接 blit。
+    """
     pw, ph, h = POND_W2, POND_H2, BANK_H
-    seg = 6
+    seg = 8
     walls = []
     for i in range(seg):
         x0, x1 = -pw + 2 * pw * i / seg, -pw + 2 * pw * (i + 1) / seg
-        c = SAND if i % 2 == 0 else SAND_D
-        walls.append(([V3(x0, ph, 0), V3(x1, ph, 0), V3(x1, ph, h), V3(x0, ph, h)], c))
-        walls.append(([V3(x0, -ph, 0), V3(x1, -ph, 0), V3(x1, -ph, h), V3(x0, -ph, h)], c))
         y0, y1 = -ph + 2 * ph * i / seg, -ph + 2 * ph * (i + 1) / seg
-        walls.append(([V3(-pw, y0, 0), V3(-pw, y1, 0), V3(-pw, y1, h), V3(-pw, y0, h)], c))
-        walls.append(([V3(pw, y0, 0), V3(pw, y1, 0), V3(pw, y1, h), V3(pw, y0, h)], c))
-    for pts, c in walls:
-        flat_polygon(painter, cam, pts, c, layer=3)
+        walls.append(([V3(x0, ph, 0), V3(x1, ph, 0), V3(x1, ph, h), V3(x0, ph, h)],
+                      (x0 + x1) / 2, "y+"))
+        walls.append(([V3(x0, -ph, 0), V3(x1, -ph, 0), V3(x1, -ph, h), V3(x0, -ph, h)],
+                      (x0 + x1) / 2, "y-"))
+        walls.append(([V3(-pw, y0, 0), V3(-pw, y1, 0), V3(-pw, y1, h), V3(-pw, y0, h)],
+                      (y0 + y1) / 2, "x-"))
+        walls.append(([V3(pw, y0, 0), V3(pw, y1, 0), V3(pw, y1, h), V3(pw, y0, h)],
+                      (y0 + y1) / 2, "x+"))
+    # 立面: 由湿到干的高度渐变(分 4 条带, 颜色连续不出现方块接缝)
+    for pts, coord, side in walls:
+        for k in range(4):
+            z0, z1 = h * k / 4, h * (k + 1) / 4
+            band = []
+            for p in pts:
+                band.append(V3(p.x, p.y, clamp(p.z, z0, z1)))
+            x_ref = coord if side[0] == "x" else abs(coord)
+            col = _sand_color(x_ref, (z0 + z1) / 2)
+            if side[1] == "+":                            # 南壁受光更多
+                col = add_light(col, 0.05)
+            else:
+                col = shade(col, 0.97)
+            flat_polygon(painter, cam, band, col, layer=3)
     rim = 44
     for pts in ([V3(-pw - rim, ph, h + 0.3), V3(pw + rim, ph, h + 0.3),
                  V3(pw + rim, ph + rim, h + 0.3), V3(-pw - rim, ph + rim, h + 0.3)],
@@ -321,38 +542,100 @@ def draw_banks(painter, cam, t, props):
                  V3(-pw - rim, ph + rim, h + 0.3), V3(-pw - rim, -ph - rim, h + 0.3)],
                 [V3(pw, -ph, h + 0.3), V3(pw, ph, h + 0.3),
                  V3(pw + rim, ph + rim, h + 0.3), V3(pw + rim, -ph - rim, h + 0.3)]):
-        flat_polygon(painter, cam, pts, SAND, layer=3)
+        flat_polygon(painter, cam, pts, _sand_color(0, BANK_H * 0.9), layer=3)
     # 塘外草地: 铺满远方, 镜头低角度时不再露出虚空
     FAR = 2600
-    meadow = (98, 132, 66)
-    for pts in ([V3(-FAR, ph + rim, h - 0.5), V3(FAR, ph + rim, h - 0.5),
-                 V3(FAR, FAR, h - 0.5), V3(-FAR, FAR, h - 0.5)],
-                [V3(-FAR, -ph - rim, h - 0.5), V3(FAR, -ph - rim, h - 0.5),
-                 V3(FAR, -FAR, h - 0.5), V3(-FAR, -FAR, h - 0.5)],
-                [V3(-FAR, -ph - rim, h - 0.5), V3(-pw - rim, -ph - rim, h - 0.5),
-                 V3(-pw - rim, ph + rim, h - 0.5), V3(-FAR, ph + rim, h - 0.5)],
-                [V3(pw + rim, -ph - rim, h - 0.5), V3(FAR, -ph - rim, h - 0.5),
-                 V3(FAR, ph + rim, h - 0.5), V3(pw + rim, ph + rim, h - 0.5)]):
-        flat_polygon(painter, cam, pts, meadow, layer=3)
-    for (rx, ry, rr) in props["rocks"]:                   # 岩石
-        sphere(painter, cam, V3(rx, ry, h + rr * 0.15), rr, (152, 144, 126), layer=3)
-    for (gx, gy), gh, gph in props["grass"]:              # 草丛（三叶小扇）
+    for near, far, side in ((ph + rim, FAR, "n"), (-FAR, -ph - rim, "s"),
+                            (-FAR, pw * -1 - rim, "w"), (pw + rim, FAR, "e")):
+        steps = 6
+        for i in range(steps):                         # 由近及远的雾化渐变草地
+            f0, f1 = i / steps, (i + 1) / steps
+            col = mix(MEADOW, (150, 172, 138), f0 ** 1.4 * 0.85)
+            if side in ("n", "s"):
+                a0 = near + (far - near) * f0
+                a1 = near + (far - near) * f1
+                pts = ([V3(-FAR, a0, h - 0.5), V3(FAR, a0, h - 0.5),
+                        V3(FAR, a1, h - 0.5), V3(-FAR, a1, h - 0.5)] if side == "n" else
+                       [V3(-FAR, a1, h - 0.5), V3(FAR, a1, h - 0.5),
+                        V3(FAR, a0, h - 0.5), V3(-FAR, a0, h - 0.5)])
+            else:
+                a0 = near + (far - near) * f0
+                a1 = near + (far - near) * f1
+                lo, hi = -ph - rim, ph + rim
+                pts = ([V3(a0, lo, h - 0.5), V3(a1, lo, h - 0.5),
+                        V3(a1, hi, h - 0.5), V3(a0, hi, h - 0.5)] if side == "w" else
+                       [V3(a1, lo, h - 0.5), V3(a0, lo, h - 0.5),
+                        V3(a0, hi, h - 0.5), V3(a1, hi, h - 0.5)])
+            flat_polygon(painter, cam, pts, col, layer=3)
+    for k in range(46):                                # 草地上零散的深色草丛
+        a = _hash01(k, 3, 21) * math.tau
+        d = 120 + 1500 * _hash01(k, 4, 22)
+        tx, ty = math.cos(a) * d, math.sin(a) * d
+        if abs(tx) < pw + 30 and abs(ty) < ph + 30:
+            continue
+        r = 12 + 26 * _hash01(k, 5, 23)
+        flat_polygon(painter, cam,
+                     [V3(tx + math.cos(a2) * r, ty + math.sin(a2) * r * 0.7, h - 0.4)
+                      for a2 in [2 * math.pi * i / 7 for i in range(7)]],
+                     mix(MEADOW, (44, 72, 40), 0.45), layer=3)
+    for (px, py, pr) in props["pebbles"]:                 # 沙面卵石
+        sphere(painter, cam, V3(px, py, h + 0.35), pr, (196, 182, 156), layer=3)
+    for (rx, ry, rr, rcol) in props["rocks"]:             # 岩石
+        soft_shadow(painter, cam, V3(rx + rr * 0.35, ry + rr * 0.30, h + 0.4),
+                    rr * 1.15, rr * 0.75, 0.85, bias=-0.4, layer=3)
+        sphere(painter, cam, V3(rx, ry, h + rr * 0.22), rr, rcol, layer=3)
+        for k in range(2):                                # 岩面斑点
+            a = 1.1 + k * 2.0
+            sphere(painter, cam,
+                   V3(rx + math.cos(a) * rr * 0.42, ry + math.sin(a) * rr * 0.30,
+                      h + rr * 0.25), rr * 0.16, shade(rcol, 0.82), bias=0.2, layer=3)
+    for (bx, by, br, bc) in props["bushes"]:              # 灌木丛（主球 + 次球簇）
+        if br > 42:
+            soft_shadow(painter, cam, V3(bx + br * 0.3, by + br * 0.25, h + 0.4),
+                        br * 1.05, br * 0.7, 0.8, bias=-0.4, layer=3)
+        blobs = ((0.0, 0.0, 1.0, 0.0), (0.55, 0.15, 0.58, 0.10),
+                 (-0.5, -0.16, 0.5, -0.06), (0.12, -0.5, 0.46, 0.06))
+        for dx, dy, k, lift in blobs:
+            col = mix(bc, (18, 34, 20), 0.22) if lift < 0 else add_light(bc, 0.10 * k)
+            sphere(painter, cam,
+                   V3(bx + dx * br, by + dy * br, h + br * (0.72 + lift)),
+                   br * k, col, layer=3)
+        for k in range(2):                                # 叶簇纹理
+            a = 0.7 + k * 1.26
+            sphere(painter, cam,
+                   V3(bx + math.cos(a) * br * 0.62, by + math.sin(a) * br * 0.5,
+                      h + br * (0.85 + 0.08 * math.sin(a))),
+                   br * 0.17, add_light(bc, 0.22), bias=0.3, layer=3)
+
+
+def draw_bank_plants(painter, cam, t, props):
+    """会随风摆动的部分：草丛与芦苇香蒲（每帧实时画）。"""
+    h = BANK_H
+    for (gx, gy), gh, gph in props["grass"]:              # 草丛
         for k in range(3):
-            a = gph + k * 0.5 - 0.5
-            tip = V3(gx + math.cos(a) * 5, gy + math.sin(a) * 5, h + gh)
-            segment(painter, cam, V3(gx, gy, h), tip, (96, 138, 64), 2, layer=3)
+            a = gph + k * 0.42 - 0.84
+            lean = 0.45 + 0.35 * math.sin(t * 0.6 + gph + k)
+            mid = V3(gx + math.cos(a) * 3.4 * lean, gy + math.sin(a) * 3.4 * lean, h + gh * 0.55)
+            tip = V3(gx + math.cos(a) * 5.6 * lean, gy + math.sin(a) * 5.6 * lean, h + gh)
+            base_c = (74, 116, 54) if k % 2 else (88, 132, 62)
+            segment(painter, cam, V3(gx, gy, h), mid, base_c, 2, layer=3)
+            segment(painter, cam, mid, tip, add_light(base_c, 0.16), 2, layer=3)
     for (rx, ry, rh, cattail, ph2) in props["reeds"]:     # 芦苇与香蒲
         sway = math.sin(t * 0.9 + ph2) * 3.0
         base = V3(rx, ry, h)
+        mid = V3(rx + sway * 0.45, ry + 1.5, h + rh * 0.55)
         tip = V3(rx + sway, ry, h + rh)
-        segment(painter, cam, base, tip, (62, 108, 52), 3, layer=3)
-        segment(painter, cam, base, V3(rx + sway * 0.5 - 6, ry - 3, h + rh * 0.55),
-                (80, 126, 62), 2, layer=3)
-        if cattail:
-            segment(painter, cam, V3(rx + sway, ry, h + rh - 9), tip, (98, 66, 38), 6, layer=3)
-    for (bx, by, br, bc) in props["bushes"]:              # 灌木丛（主球 + 次球簇）
-        sphere(painter, cam, V3(bx, by, h + br * 0.75), br, bc, layer=3)
-        sphere(painter, cam, V3(bx + br * 0.5, by + br * 0.15, h + br * 0.55), br * 0.55, bc, layer=3)
+        segment(painter, cam, base, mid, (52, 96, 46), 3, layer=3)
+        segment(painter, cam, mid, tip, (92, 140, 66), 3, layer=3)
+        blade_mid = V3(rx + sway * 0.5 - 5, ry - 3, h + rh * 0.45)
+        segment(painter, cam, base, blade_mid, (72, 116, 58), 2, layer=3)
+        if cattail:                                       # 香蒲穗: 圆柱 + 高光
+            c0 = V3(rx + sway, ry, h + rh - 15)
+            c1 = V3(rx + sway, ry, h + rh - 3)
+            segment(painter, cam, c0, c1, (86, 56, 32), 6, layer=3)
+            segment(painter, cam, V3(c0.x - 0.6, c0.y - 0.6, c0.z + 2),
+                    V3(c1.x - 0.6, c1.y - 0.6, c1.z - 2), (134, 92, 52), 2, layer=3)
+            segment(painter, cam, c1, V3(rx + sway, ry, h + rh + 1.5), (128, 96, 58), 2, layer=3)
 
 
 def build_vignette(w, h):

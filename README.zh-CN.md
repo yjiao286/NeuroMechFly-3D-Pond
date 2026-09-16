@@ -15,10 +15,12 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-![金色方框标注的神经元果蝇，右侧是 GF / CX / REST 神经面板](docs/images/neural-fly.png)
+![NeuroMechFly：真果蝇模型，由 micro-CT 网格组装并在 MuJoCo 中渲染](docs/images/neuromechfly.png)
 
-*金框金字的果蝇是唯一由脉冲神经网络驱动的个体。右侧面板就是它四个环路的膜电位实时充放电
-——这张图里青蛙已经走进巨纤维 170 的逃逸半径，GF 的条几乎满了。*
+*这不是贴图。`real_fly_demo.py` 用 FlyGym 自带的 micro-CT 网格组装出**真的**果蝇——70 个体节、
+126 个关节自由度、足端 6 个附着执行器、两只复眼相机——再在 MuJoCo 里离屏渲染。
+力学与神经接口见[真·果蝇](#-真果蝇flygym--neuromechfly)，游戏里那只脉冲神经果蝇见
+[神经元个体](#神经元个体)。*
 
 ---
 
@@ -38,6 +40,11 @@
 池塘里的每只果蝇都会飞、会走、会进食、会梳洗。只有一只还会**做决定**。大脑在
 [`fly_brain.py`](fly_brain.py)：一个小型泄漏整合发放脉冲神经网络，每帧做子步进数值积分——
 它不是装饰，环路不发放，果蝇就不动。
+
+![金色方框标注的神经元果蝇，右侧是 GF / CX / REST 神经面板](docs/images/neural-fly.png)
+
+*金框金字的果蝇是唯一由脉冲神经网络驱动的个体。右侧面板就是它四个环路的膜电位实时充放电
+——这张图里青蛙已经走进巨纤维 170 的逃逸半径，GF 的条几乎满了。*
 
 | 环路 | 作用 | tau | 触发条件 |
 |---|---|---|---|
@@ -84,11 +91,9 @@ NeuroMechFly 身体**，包括它复眼的读数。从 4 个神经元的卡通�
 
 ## 🧬 真·果蝇：FlyGym / NeuroMechFly
 
-下面这只**不是游戏素材**：它由 [`real_fly_demo.py`](real_fly_demo.py) 用
-[FlyGym](https://neuromechfly.org)（EPFL 的有身体果蝇感运动研究平台）自带的 micro-CT 网格
-组装，并在 MuJoCo 里离屏渲染出来。
-
-![NeuroMechFly：真果蝇模型，由 MuJoCo 组装并离屏渲染](docs/images/neuromechfly.png)
+本文[最上方那张图](#-果蝇池塘-3d--fly-brain-pond-)**不是游戏素材**：它由
+[`real_fly_demo.py`](real_fly_demo.py) 用 [FlyGym](https://neuromechfly.org)（EPFL 的有身体
+果蝇感运动研究平台）自带的 micro-CT 网格组装，并在 MuJoCo 里离屏渲染出来。
 
 ### 力学：一只有关节、有附着、能推拉的果蝇
 
@@ -157,8 +162,8 @@ Numba 还要 JIT 编译视网膜采样（约一分钟）。想要 GPU 后端装 
 没有任何美术资源：每一个多边形都由 [`render3d.py`](render3d.py) 自己投影、排序、绘制。
 
 ```bash
-git clone https://github.com/yjiao286/fly-brain-pond.git
-cd fly-brain-pond
+git clone https://github.com/yjiao286/neuro-pond.git
+cd neuro-pond
 
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt   # Windows: .venv\Scripts\pip
@@ -213,6 +218,22 @@ python -m venv .venv
 
 另外所有落地生物对荷叶高度有感知（叶面随波起伏也实时跟随），脚踩叶面之上；
 果蝇各部件（足/腹/胸/头/眼/翅）以不同高度与偏置绘制。
+
+## 光照与材质是怎么做的
+
+手写渲染不等于平涂。在 `render3d.py` 里有一层很小的"材质系统"：
+
+- **全场景一盏主光**（`LIGHT_XY`）：所有球体与穹顶都朝同一个世界空间太阳方向打光，
+  镜头怎么转，高光方向都保持一致。
+- **`sphere()`**：边缘压暗的底色 + 向光侧逐层内缩提亮 + 镜面高光点 + 细描边——
+  灌木、岩石、复眼、食饵碎屑从"扁圆片"变成有体积的球。
+- **`dome()`**：同一套逻辑用在扁平的受光面上（青蛙背、头、荷叶、卵石）：边缘压暗 →
+  内缩提亮 → 高光。
+- **`soft_shadow()`**：把预生成的径向衰减贴图按投影尺寸缩放贴到地面，阴影是柔的而不是硬多边形。
+- **水面分三层**：南北大气渐变底 + 漂移的细波纹短划 + 焦散闪点；**荷叶**有放射叶脉、
+  近侧叶缘高光与叶背厚度；**草地**向远处雾化成层并散落深色草丛；天空带地平线暖光与飘动的云。
+- 岸上的静态布景（堤壁、草地、卵石、岩石、灌木）按机位渲染进一张离屏缓存图层，
+  于是"整池尽收眼底"的一帧在软件渲染下约 **18 ms**，只有摇摆的芦苇与草丛是每帧实时画的。
 
 ## 文件结构
 

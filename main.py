@@ -22,8 +22,9 @@ import pygame
 
 import scenery
 from fly_brain import FlyBrain
-from render3d import (Camera3D, Painter, V3, clamp, ellipse_pts, flat_polygon,
-                      segment, sphere)
+from render3d import (Camera3D, Painter, V3, add_light, clamp, dome, ellipse_pts,
+                      flat_polygon, mix, polyline, segment, shade, soft_shadow,
+                      sphere)
 from sounds import SoundKit
 
 W, H = 1280, 800
@@ -175,62 +176,75 @@ class Frog:
         z = self.z
         gz = ground_z(self.pos, pads, t)
         s = 1.0 - self.z / 170.0
-        shadow = ellipse_pts(x + 6, y + 3, gz + 0.15, 34 * s, 25 * s, h)
-        flat_polygon(painter, cam, shadow, (16, 48, 40), bias=-4)
+        soft_shadow(painter, cam, V3(x + 7, y + 4, gz + 0.18), 40 * s, 30 * s,
+                    1.05, bias=-4)
         swing = math.sin(self.walk_phase) * 9 if self._moving and self.state == "ground" else 0.0
         airborne = self.state == "air"
-        leg_c = (46, 88, 40)
+        leg_c = (52, 96, 46)
+        skin = (108, 172, 76)                       # 主色（背部受光面）
+        skin_dark = (74, 128, 56)                   # 阴影/边缘
         for side in (-1, 1):
             # 后腿股（大块肌肉，贴着身体）+ 脚蹼
             hx, hy = rot2(-14, side * 22, h)
-            sphere(painter, cam, V3(x + hx, y + hy, z + 11), 14, (80, 134, 58), bias=0.4)
+            sphere(painter, cam, V3(x + hx, y + hy, z + 11), 14, (88, 146, 64), bias=0.4)
             fx, fy = rot2(-30 + (swing if side > 0 else -swing) * 0.5, side * 38, h)
             foot_z = gz + 0.15 if not airborne else self.z * 0.3 + 3
-            flat_polygon(painter, cam,
-                         ellipse_pts(x + fx, y + fy, foot_z, 11, 7, h), (66, 118, 50), bias=0.2)
+            dome(painter, cam, ellipse_pts(x + fx, y + fy, foot_z, 12, 7.6, h),
+                 (72, 126, 54), bias=0.2, sheen=0.18)
             # 前腿 + 三趾；bias 让腿根藏进身体下不穿模
             sx2, sy2 = rot2(20, side * 15, h)
             ffx, ffy = rot2(32 + (swing if side > 0 else -swing) * 0.4, side * 28, h)
             shoulder = V3(x + sx2, y + sy2, z + 7)
             foot = V3(x + ffx, y + ffy, foot_z)
-            segment(painter, cam, shoulder, foot, leg_c, 6, bias=2.5)
+            segment(painter, cam, shoulder, foot, shade(leg_c, 0.85), 6, bias=2.5)
+            segment(painter, cam, shoulder, foot, leg_c, 3, bias=2.45)
             for k in range(3):
                 ta = h + side * 0.35 + (k - 1) * 0.32
                 toe = V3(x + ffx + math.cos(ta) * 7, y + ffy + math.sin(ta) * 7, foot_z)
                 segment(painter, cam, foot, toe, leg_c, 2, bias=2.5)
-        # 身体穹顶 + 斑点
-        flat_polygon(painter, cam, ellipse_pts(x, y, z + 8, 41, 30, h), (96, 156, 68), bias=0.2)
+        # 身体穹顶：受光渐变 + 背脊高光 + 迷彩斑点 + 边缘描线
+        dome(painter, cam, ellipse_pts(x, y, z + 8, 41, 30, h), skin, bias=0.2,
+             outline=shade(skin, 0.62), owidth=2, sheen=0.34)
         for (sx, sy), sr in self.skin_spots:                       # 迷彩斑点
             ex, ey = rot2(sx, sy, h)
             flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, z + 8.4, sr, sr * 0.72, h),
-                         (70, 122, 52), bias=0.3)
-        flat_polygon(painter, cam, ellipse_pts(x, y, z + 11, 30, 21, h), (110, 170, 80), bias=0.5)
+                         mix(skin_dark, skin, 0.25), bias=0.3)
+        ridge = []
+        for i in range(7):                                         # 背脊高光带
+            f = i / 6
+            rx2, ry2 = rot2(-30 + 58 * f, math.sin(f * math.pi) * 3.5, h)
+            ridge.append(V3(x + rx2, y + ry2, z + 12.4))
+        polyline(painter, cam, ridge, add_light(skin, 0.34), 2)
+        dome(painter, cam, ellipse_pts(x, y, z + 11, 30, 21, h), add_light(skin, 0.10),
+             bias=0.5, sheen=0.22)
         for bx, by, br in ((-9, -10, 8), (7, 9, 9), (-22, 3, 6), (16, -6, 6)):
             ex, ey = rot2(bx, by, h)
             flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, z + 9.6, br, br * 0.7, h),
-                         (74, 126, 54), bias=0.4)
+                         mix(skin_dark, skin, 0.18), bias=0.4)
         # 头 + 嘴线
         hxp, hyp = rot2(32, 0, h)
-        flat_polygon(painter, cam, ellipse_pts(x + hxp, y + hyp, z + 12, 23, 17, h),
-                     (102, 162, 74), (58, 106, 46), 2, bias=0.6)
+        dome(painter, cam, ellipse_pts(x + hxp, y + hyp, z + 12, 23, 17, h),
+             add_light(skin, 0.05), bias=0.6, outline=shade(skin, 0.58), owidth=2,
+             sheen=0.30)
         m1x, m1y = rot2(48, -11, h)
         m2x, m2y = rot2(48, 11, h)
         segment(painter, cam, V3(x + m1x, y + m1y, z + 10), V3(x + m2x, y + m2y, z + 10),
-                (44, 82, 38), 2)
+                shade(skin, 0.42), 2)
         # 金色眼睛：头顶前部一对鼓包，带深色竖瞳
         for side in (-1, 1):
             ex, ey = rot2(28, side * 9, h)
-            sphere(painter, cam, V3(x + ex, y + ey, z + 17), 8.0, (242, 206, 72), bias=0.5)
+            sphere(painter, cam, V3(x + ex, y + ey, z + 17), 8.4, (246, 206, 74), bias=0.5)
             px, py = rot2(33, side * 8, h)
-            sphere(painter, cam, V3(x + px, y + py, z + 17.5), 2.8, (28, 24, 18), bias=0.7)
+            sphere(painter, cam, V3(x + px, y + py, z + 17.6), 2.9, (34, 28, 22), bias=0.7)
+            sphere(painter, cam, V3(x + px, y + py, z + 22.6), 1.1, (250, 246, 232), bias=0.72)
         # 舌头（红色圆珠链，每颗独立深度）
         if self.tongue and self.tongue["tip"]:
             tip = self.tongue["tip"]
             mouth = self.mouth_pos()
             for i in range(7):
                 p = mouth.lerp(tip, i / 6)
-                sphere(painter, cam, p, 4.5 - 1.5 * (i / 6), (208, 62, 62))
-            sphere(painter, cam, tip, 6, (232, 120, 120))
+                sphere(painter, cam, p, 4.6 - 1.5 * (i / 6), (214, 68, 68))
+            sphere(painter, cam, tip, 6.2, (238, 128, 128))
 
 
 # ---------------------------------------------------------------- 果蝇
@@ -290,8 +304,8 @@ class FlyBase:
         sh = clamp(1.0 - z / 55.0, 0.25, 1.0)
 
         # 影子贴地（不穿进荷叶：影子高度=地面高度）
-        shadow = ellipse_pts(x + 3 * sh, y + 2 * sh, gz + 0.15, 9 * sh, 5.5 * sh, h)
-        flat_polygon(painter, cam, shadow, (10, 34, 28), bias=-4)
+        soft_shadow(painter, cam, V3(x + 3 * sh, y + 2 * sh, gz + 0.16),
+                    10 * sh, 6.2 * sh, 0.9, bias=-4)
         # 六足: 髋→膝→足 三点两段, 各状态独立步态
         legs = (
             ((2.4, -1.6), (6.2, -3.8), (9.0, -5.6)),
@@ -360,7 +374,20 @@ class FlyBase:
         sphere(painter, cam, ab2, 2.7, (176, 132, 84), bias=0.55)
         sphere(painter, cam, ab3, 2.2, (104, 66, 44), bias=0.6)
         th = V3(x + rot2(0.8, 0, h)[0], y + rot2(0.8, 0, h)[1], z + 1.6)
-        sphere(painter, cam, th, 3.5, (206, 150, 92), bias=0.8)
+        sphere(painter, cam, th, 3.6, (212, 156, 96), bias=0.8)
+        # 胸部刚毛：真实果蝇最有辨识度的特征之一
+        for k in range(6):
+            ba = h + math.pi / 2 + (k - 2.5) * 0.42
+            tilt = 0.4 + 0.25 * abs(k - 2.5) / 2.5
+            b0 = V3(x + rot2(0.6 + (k % 3) * 0.7, (k - 2.5) * 0.55, h)[0],
+                    y + rot2(0.6 + (k % 3) * 0.7, (k - 2.5) * 0.55, h)[1], z + 3.4)
+            b1 = V3(b0.x + math.cos(ba) * 1.5, b0.y + math.sin(ba) * 1.5,
+                    z + 3.4 + 1.9 * tilt)
+            segment(painter, cam, b0, b1, (92, 62, 40), 1, bias=0.5)
+        # 平衡棒（后翅退化成的陀螺仪器官，飞行平衡用）
+        for side in (-1, 1):
+            hp = V3(x + rot2(-2.6, side * 2.4, h)[0], y + rot2(-2.6, side * 2.4, h)[1], z + 1.4)
+            sphere(painter, cam, hp, 0.9, (232, 206, 122), bias=0.5)
         hd = V3(x + rot2(5.8, 0, h)[0], y + rot2(5.8, 0, h)[1], z + 2.2)
         sphere(painter, cam, hd, 2.4, (206, 156, 100), bias=1.1)
         # 触角
@@ -379,7 +406,7 @@ class FlyBase:
             self._seg(painter, cam, p1, p2, (160, 118, 72), 2)
             sphere(painter, cam, p2, 1.3, (150, 100, 62), bias=0.3)
         # 双翅: 飞行展开振动(带翅脉), 落地收拢在背上
-        wing_c = (242, 238, 224)
+        wing_c = (236, 240, 234)
         if flying:
             for side in (-1, 1):
                 flap = 0.5 * math.sin(self.wing_phase + (0 if side < 0 else math.pi))
@@ -390,10 +417,20 @@ class FlyBase:
                        V3(x + bx + wx * 5, y + by + wy * 5, z + 5.2),
                        V3(x + bx + wx * 13, y + by + wy * 13, z + 3.4),
                        V3(x + bx + wx * 7 - wy * side * 3, y + by + wy * 7 + wx * side * 3, z + 2.2)]
-                flat_polygon(painter, cam, pts, wing_c, bias=0.3)
-                vein_a = V3(x + bx + wx * 3, y + by + wy * 3, z + 3.6)
-                vein_b = V3(x + bx + wx * 11, y + by + wy * 11, z + 2.8)
-                self._seg(painter, cam, vein_a, vein_b, (170, 195, 210), 1)
+                edge = [V3(p.x - wy * side * 0.5, p.y + wx * side * 0.5, p.z + 0.05) for p in pts]
+                flat_polygon(painter, cam, edge, (198, 214, 214), bias=0.26)
+                dome(painter, cam, pts, wing_c, bias=0.3, sheen=0.22)
+                for k in range(3):                        # 翅脉: 由翅基扇形展开
+                    f = 0.35 + 0.3 * k
+                    self._seg(painter, cam,
+                              V3(x + bx + wx * 2.2, y + by + wy * 2.2, z + 3.2),
+                              V3(x + bx + wx * 12.4 * f + wy * side * (1.6 - k),
+                                 y + by + wy * 12.4 * f - wx * side * (1.6 - k),
+                                 z + 3.6 - 0.4 * k), (186, 206, 214), 1)
+                self._seg(painter, cam,
+                          V3(x + bx + wx * 4, y + by + wy * 4, z + 5.0),
+                          V3(x + bx + wx * 12, y + by + wy * 12, z + 3.6),
+                          (252, 252, 244), 1)             # 前缘高光
         else:
             # 收拢的翅: 贴在背上沿身体方向的窄翅面, 不再伸出身后形成"重影"
             for side in (-1, 1):
@@ -402,7 +439,10 @@ class FlyBase:
                 tx, ty = rot2(-7.8, side * 0.9, h)
                 pts = [V3(x + bx, y + by, z + 2.2), V3(x + mx, y + my, z + 2.35),
                        V3(x + tx, y + ty, z + 2.1), V3(x + tx - 0.8, y + ty - 0.8, z + 1.9)]
-                flat_polygon(painter, cam, pts, (222, 226, 216), bias=0.55, layer=4)
+                dome(painter, cam, pts, (226, 232, 226), bias=0.55, layer=4, sheen=0.20)
+                self._seg(painter, cam,
+                          V3(x + bx, y + by, z + 2.25),
+                          V3(x + tx, y + ty, z + 2.15), (244, 248, 244), 1)
 
 
 def mode_eat(fly):
@@ -575,6 +615,8 @@ class Game:
         self._rotating = False
         self._down = None                         # [x, y, 累计位移]
         self.painter = Painter()
+        self._bank_key = None
+        self._bank_surf = None
         self.vignette = scenery.build_vignette(W, H)
         self.bank_props = scenery.make_bank_props()
         self.pads = scenery.make_pads()
@@ -787,21 +829,11 @@ class Game:
                       random.uniform(-1, 1) * self.shake * 10,
                       random.uniform(-1, 1) * self.shake * 8)
         self.cam.set_view(eye, self.cam_target)
-        # 天空：地平线以上的雾霾渐变
-        hor = self.cam.project(self.cam.pos + self.cam.fwd * 3000)
-        if hor:
-            hy = clamp(int(hor[1]), 0, H)
-            bands = 18
-            for i in range(bands):
-                f = i / (bands - 1)
-                c = (int(150 + 58 * f), int(166 + 44 * f), int(156 + 42 * f))
-                y0 = int(hy * i / bands)
-                y1 = int(hy * (i + 1) / bands) + 1
-                pygame.draw.rect(surf, c, (0, y0, W, y1 - y0))
-            pygame.draw.rect(surf, (9, 41, 39), (0, hy, W, H - hy))
+        scenery.draw_sky(surf, self.cam, self.t)
         painter, cam = self.painter, self.cam
         scenery.draw_pond(painter, cam, self.t)
-        scenery.draw_banks(painter, cam, self.t, self.bank_props)
+        self._paint_bank_base(painter, cam)
+        scenery.draw_bank_plants(painter, cam, self.t, self.bank_props)
         self.ripples.draw(painter, cam)
         scenery.draw_duckweed(painter, cam, self.t, self.duckweed)
         for pad in self.pads:
@@ -835,7 +867,27 @@ class Game:
         surf.blit(self.vignette, (0, 0))
         self._draw_hud()
 
+    def _paint_bank_base(self, painter, cam):
+        """岸上静态布景（堤壁/草地/卵石/岩石/灌木）按机位缓存成一张贴图。
+
+        这些内容只跟机位有关，机位不动时每帧只 blit 一次，省下上千次多边形/圆形绘制；
+        会摇摆的草丛与芦苇仍走每帧实时绘制。
+        """
+        key = (round(self.cam_yaw, 4), round(self.cam_elev, 4), round(self.dist, 2),
+               round(self.cam_target.x, 1), round(self.cam_target.y, 1),
+               self.shake > 0)
+        if self._bank_key != key:
+            cache = pygame.Surface((W, H), pygame.SRCALPHA)
+            sub = Painter()
+            scenery.draw_bank_base(sub, cam, self.bank_props)
+            sub.flush(cache)
+            self._bank_key, self._bank_surf = key, cache
+        img = self._bank_surf
+        # 深度取最大 → 在 BANK 层里最先画, 荷叶/生物仍然照常盖在它上面
+        painter.add(1e6, lambda s, img=img: s.blit(img, (0, 0)), Painter.BANK)
+
     def _draw_brackets(self, surf, bf):
+        """金色方框 + 状态标注：标出唯一的神经元个体。"""
         sp = self.cam.project(V3(bf.pos.x, bf.pos.y, bf.z + 6))
         if sp is None:
             return
