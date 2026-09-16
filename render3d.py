@@ -36,6 +36,13 @@ def mix(a, b, f):
 LIGHT_XY = (-0.58, -0.42)
 WHITE = (255, 255, 255)
 
+# 风格参数：整体偏"哑光卡通"而不是塑料球——边缘只略压暗, 高光小而淡, 描边很轻。
+EDGE_K = 0.80            # 暗面 = 本色 × EDGE_K
+LIT_K = 1.07             # 亮面 = 本色 × LIT_K
+SPEC_MIX = 0.30          # 镜面高光与白色的混合比(越大越亮)
+SPEC_SIZE = 0.17         # 镜面高光半径 / 球半径
+OUTLINE_K = 0.70         # 描边颜色
+
 
 def add_light(color, k=0.25):
     return mix(color, WHITE, k)
@@ -65,7 +72,7 @@ def _shadow_blob(size=80, alpha=132):
         c = size / 2
         for i in range(size // 2, 0, -1):
             f = i / (size / 2)
-            a = int(alpha * (1.0 - f) ** 0.75)
+            a = int(alpha * (1.0 - f) ** 1.15)
             pygame.draw.circle(surf, (6, 22, 18, a), (int(c), int(c)), i)
         _BLOBS[key] = surf
     return surf
@@ -82,8 +89,8 @@ def soft_shadow(painter, cam, pos, rx, ry=None, strength=1.0, bias=-6.0, layer=4
     h = cam.screen_radius(ry, depth)
     if w < 1.0 or h < 1.0:
         return
-    blob = _shadow_blob(80, int(clamp(150 * strength, 20, 200)))
-    size = (max(2, int(w * 2)), max(2, int(h * 2)))
+    blob = _shadow_blob(80, int(clamp(96 * strength, 14, 130)))
+    size = (max(2, int(w * 1.8)), max(2, int(h * 1.8)))
     key = (int(strength * 1000), size[0] // 4, size[1] // 4)
     img = _SHADOW_SCALED.get(key)
     if img is None:
@@ -213,9 +220,9 @@ def flat_polygon(painter, cam, pts3, color, outline=None, owidth=2, bias=0.0, la
     return depth - bias
 
 
-def sphere(painter, cam, pos, r, color, bias=0.0, layer=4):
+def sphere(painter, cam, pos, r, color, bias=0.0, layer=4, sheen=1.0):
     """球体：边缘压暗 + 逐层向光面提亮 + 镜面高光 + 细描边。
-    bias>0 = 视觉上前置。"""
+    bias>0 = 视觉上前置。sheen<1 可把高光压得更哑(灌木/岩石这类粗糙表面)。"""
     p = cam.project(pos)
     if p is None:
         return
@@ -224,27 +231,25 @@ def sphere(painter, cam, pos, r, color, bias=0.0, layer=4):
     if rs < 0.55:
         return
     rad = min(max(1, int(rs)), 4000)
-    dark = shade(color, 0.58)
-    lit = add_light(shade(color, 1.04), 0.12)
-    steps = 2 if rad <= 7 else 3                # 小球少画几层, 省时间也够看
-    rings = [(max(1, int(rad * (1 - 0.54 * (i + 1) / steps))),
-              (-0.32 * rad * (i + 1) / steps, -0.38 * rad * (i + 1) / steps),
-              mix(dark, lit, (i + 1) / steps)) for i in range(steps)]
-    hx, hy = -0.38 * rad, -0.44 * rad
-    spec = max(1, int(rad * 0.26))
+    dark = shade(color, EDGE_K)
+    lit = add_light(shade(color, LIT_K), 0.05)
+    steps = 2 if rad <= 7 else 4                # 小球少画几层, 省时间也够看
+    rings = [(max(1, int(rad * (1 - 0.46 * (i + 1) / steps))),
+              (-0.24 * rad * (i + 1) / steps, -0.29 * rad * (i + 1) / steps),
+              mix(dark, lit, ((i + 1) / steps) ** 0.85)) for i in range(steps)]
+    hx, hy = -0.30 * rad, -0.34 * rad
+    spec = max(1, int(rad * SPEC_SIZE * sheen))
 
     def draw(s, sx=sx, sy=sy, rad=rad, dark=dark, rings=rings, hx=hx, hy=hy,
-             spec=spec, color=color):
+             spec=spec, color=color, sheen=sheen):
         pygame.draw.circle(s, dark, (int(sx), int(sy)), rad)
         for rr, (ox, oy), col in rings:
             pygame.draw.circle(s, col, (int(sx + ox), int(sy + oy)), rr)
-        if rad >= 8:
-            pygame.draw.circle(s, mix(color, WHITE, 0.50), (int(sx + hx), int(sy + hy)), spec)
-            pygame.draw.circle(s, mix(color, WHITE, 0.88),
-                               (int(sx + hx * 1.15), int(sy + hy * 1.15)),
-                               max(1, int(spec * 0.45)))
-        if rad >= 5:
-            pygame.draw.circle(s, shade(color, 0.42), (int(sx), int(sy)), rad, 1)
+        if rad >= 8 and sheen > 0:
+            pygame.draw.circle(s, mix(color, WHITE, SPEC_MIX * sheen),
+                               (int(sx + hx), int(sy + hy)), spec)
+        if rad >= 9 and sheen > 0.5:
+            pygame.draw.circle(s, shade(color, OUTLINE_K), (int(sx), int(sy)), rad, 1)
 
     painter.add(depth - r * 0.01 - bias, draw, layer)
 
@@ -266,32 +271,74 @@ def dome(painter, cam, pts3, color, bias=0.0, layer=4, outline=None, owidth=1,
     cy = sum(p[1] for p in pts2d) / len(pts2d)
     span = max(2.0, sum(math.hypot(p[0] - cx, p[1] - cy) for p in pts2d) / len(pts2d))
     lx, ly = _screen_light(cam)
-    edge = shade(color, 0.60)
-    lit = add_light(shade(color, 1.05), 0.10)
+    edge = shade(color, EDGE_K)
+    lit = add_light(shade(color, LIT_K), 0.04)
     inner = []
-    for i in range(1, 4):
-        f = i / 3
-        k = 1.0 - 0.34 * f
-        ox, oy = lx * span * 0.16 * f, ly * span * 0.16 * f
+    for i in range(1, 5):
+        f = i / 4
+        k = 1.0 - 0.30 * f
+        ox, oy = lx * span * 0.13 * f, ly * span * 0.13 * f
         inner.append(([(cx + (px - cx) * k + ox, cy + (py - cy) * k + oy)
-                       for px, py in pts2d], mix(edge, lit, f * 0.95)))
-    hx, hy = cx + lx * span * 0.30, cy + ly * span * 0.24
-    hr = max(1.0, span * 0.16 * sheen * 2.0)
+                       for px, py in pts2d], mix(edge, lit, (f ** 0.9) * 0.92)))
+    # 高光跟随形状：再叠几层向光侧偏移的小内缩多边形, 比画一颗亮圆点自然得多
+    core = mix(edge, lit, 0.92)
+    spots = []
+    for i, (k, add) in enumerate(((0.52, 0.06), (0.34, 0.11), (0.20, 0.16))):
+        ox, oy = lx * span * 0.30, ly * span * 0.24
+        pts = [(cx + (px - cx) * k + ox, cy + (py - cy) * k + oy) for px, py in pts2d]
+        spots.append((pts, mix(core, WHITE, add * min(1.0, sheen * 1.4))))
 
     def draw(s, pts2d=pts2d, edge=edge, inner=inner, outline=outline, owidth=owidth,
-             hx=hx, hy=hy, hr=hr, color=color, sheen=sheen):
+             spots=spots, sheen=sheen):
         pygame.draw.polygon(s, edge, pts2d)
         for pts, col in inner:
             pygame.draw.polygon(s, col, pts)
         if outline:
             pygame.draw.polygon(s, outline, pts2d, owidth)
-        if sheen > 0 and hr >= 1.5:
-            pygame.draw.circle(s, mix(color, WHITE, 0.30 * sheen), (int(hx), int(hy)), int(hr))
-            pygame.draw.circle(s, mix(color, WHITE, 0.55 * sheen),
-                               (int(hx), int(hy)), max(1, int(hr * 0.5)))
+        if sheen > 0:
+            for pts, col in spots:
+                pygame.draw.polygon(s, col, pts)
 
     painter.add(depth - bias, draw, layer)
     return depth - bias
+
+
+def blob(painter, cam, cx, cy, z0, rx, ry, height, color, heading=0.0, layers=6,
+         bias=0.0, layer=4, taper=0.34, outline=None):
+    """椭球体体积：把若干层水平椭圆从下往上叠起来(底层暗而大、顶层亮而小)。
+
+    比单张平面多边形多一整个维度的信息——侧面能看出"厚度", 顶面有受光渐变,
+    用来做青蛙的身体/头、果蝇的胸部这类需要立体感的躯干。
+    整块体一次提交给 painter, 因此层间顺序永远稳定(不会与自身发生深度排序抖动)。
+    """
+    layers = max(2, int(layers))
+    slices = []
+    for i in range(layers):
+        f = i / (layers - 1)                      # 0 = 底部, 1 = 顶部
+        k = 1.0 - taper * (f ** 1.6)              # 越靠顶越小
+        # 层间色差压到很小(约 2~3%/层), 叠出来才是连续曲面而不是"梯田"
+        col = mix(shade(color, 0.66), add_light(color, 0.12), f ** 0.85)
+        ox = LIGHT_XY[0] * rx * 0.14 * f          # 顶部向光侧偏移
+        oy = LIGHT_XY[1] * ry * 0.14 * f
+        pts3 = ellipse_pts(cx + ox, cy + oy, z0 + height * f, rx * k, ry * k, heading)
+        vs = clip_near([cam.view(p) for p in pts3], cam.NEAR)
+        if len(vs) < 3:
+            continue
+        pts2d = [(cam.cx + cam.focal * vx / vz, cam.cy - cam.focal * vy / vz)
+                 for vx, vy, vz in vs]
+        slices.append((pts2d, col))
+    if not slices:
+        return
+    p = cam.project(V3(cx, cy, z0 + height * 0.4))
+    depth = p[2] if p else 0.0
+
+    def draw(s, slices=slices, outline=outline):
+        for pts2d, col in slices:
+            pygame.draw.polygon(s, col, pts2d)
+        if outline:
+            pygame.draw.polygon(s, outline, slices[0][0], 2)
+
+    painter.add(depth - bias, draw, layer)
 
 
 def segment(painter, cam, a, b, color, width=2, bias=0.0, layer=4):
@@ -331,3 +378,54 @@ def polyline(painter, cam, pts3, color, width=1, layer=4):
         pygame.draw.lines(s, c, False, pts, w)
 
     painter.add(depth, draw)
+
+
+def limb(painter, cam, a, b, r0, color, bias=0.0, layer=4, taper=0.62, shade_ratio=0.86):
+    """锥形肢体/茎：近端半径 r0、远端 r0×taper，带圆柱明暗。
+
+    用于青蛙与果蝇的腿、芦苇茎等"有粗细变化的杆状物"——比等宽线段更像肢体。
+    关节处用亮色填充(不是暗色圆帽), 这样两段肢体接在一起看不出"球关节"。
+    bias>0 = 视觉上后置(与 segment 一致)。
+    """
+    va, vb = cam.view(a), cam.view(b)
+    near = cam.NEAR
+    if va[2] < near and vb[2] < near:
+        return
+    if va[2] < near or vb[2] < near:
+        t = (near - va[2]) / (vb[2] - va[2])
+        pt = (va[0] + (vb[0] - va[0]) * t,
+              va[1] + (vb[1] - va[1]) * t, near)
+        if va[2] < near:
+            va = pt
+        else:
+            vb = pt
+    pa, pb = cam.project_v(va), cam.project_v(vb)
+    depth = (pa[2] + pb[2]) / 2
+    ra = cam.screen_radius(r0, pa[2])
+    rb = cam.screen_radius(r0 * taper, pb[2])
+    if ra < 0.6 and rb < 0.6:
+        return
+    lx, ly = _screen_light(cam)
+    dark = shade(color, shade_ratio)
+    core = mix(color, add_light(color, 0.18), 0.5)
+
+    def draw(s, pa=pa, pb=pb, ra=ra, rb=rb, lx=lx, ly=ly, dark=dark, core=core):
+        steps = 2 if max(ra, rb) < 4.5 else 3        # 细肢体少画一段
+        for i in range(steps):
+            f0, f1 = i / steps, (i + 1) / steps
+            p0 = (pa[0] + (pb[0] - pa[0]) * f0, pa[1] + (pb[1] - pa[1]) * f0)
+            p1 = (pa[0] + (pb[0] - pa[0]) * f1, pa[1] + (pb[1] - pa[1]) * f1)
+            w0 = max(1.0, ra + (rb - ra) * f0)
+            pygame.draw.line(s, dark, p0, p1, max(2, int(w0 * 2)))
+            ox, oy = lx * w0 * 0.34, ly * w0 * 0.34
+            pygame.draw.line(s, core, (p0[0] + ox, p0[1] + oy), (p1[0] + ox, p1[1] + oy),
+                             max(1, int(w0)))
+        # 关节处只用亮色补圆, 不画暗色外圈——否则每两段之间都顶着一颗"球关节"
+        if ra >= 2.0:
+            pygame.draw.circle(s, core, (int(pa[0] + lx * ra * 0.30),
+                                         int(pa[1] + ly * ra * 0.30)), max(1, int(ra * 0.86)))
+        if rb >= 2.0:
+            pygame.draw.circle(s, core, (int(pb[0] + lx * rb * 0.30),
+                                         int(pb[1] + ly * rb * 0.30)), max(1, int(rb * 0.86)))
+
+    painter.add(depth + bias, draw, layer)

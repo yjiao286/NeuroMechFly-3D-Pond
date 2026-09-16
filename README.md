@@ -128,6 +128,14 @@ when the camera rig changes, which is where most of the headroom comes from.
 
 ## 4 · Scenery, modelling and materials
 
+![Mid-zoom view of the pond: the gold-outlined neural fly with its GF/CX/REST panel open](docs/images/pond-neural.png)
+
+*Whole-system view, mid zoom. Everything on screen is generated at run time — water body, pads
+with radial veins and lifted rims, wet-to-dry sand ramps, reeds and bushes. In the middle of the
+pond sits the **neural individual**: the gold bracket labels its state (`巡航`), and the panel on
+the right reads its four circuits live — GF is charging because the frog is inside the 170-unit
+escape radius, CX_L/CX_R show the steering oscillators, REST is quiet.*
+
 All geometry is generated at run time from seeded RNGs; the repository contains no mesh, no
 texture and no audio file.
 

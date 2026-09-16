@@ -153,15 +153,15 @@ def draw_pond(painter, cam, t):
     for gi in range(24):
         for gj in range(16):
             r1 = _hash01(gi, gj, 3)
-            if r1 < 0.46:
+            if r1 < 0.55:
                 continue
             x = -POND_W2 + 1240 * (gi + _hash01(gi, gj, 11)) / 24
             y = -POND_H2 + 700 * (gj + _hash01(gi, gj, 12)) / 16
             s = 4.0 + 7.0 * _hash01(gi, gj, 13)
             a = (_hash01(gi, gj, 14) - 0.5) * 0.55        # 大体沿水面横向
             bright = _hash01(gi, gj, 15) > 0.5
-            col = mix(water_color(x, y, t), GLINT if bright else (8, 30, 28),
-                      0.05 + 0.07 * (r1 - 0.46) / 0.54)
+            col = mix(water_color(x, y, t), GLINT if bright else (10, 34, 32),
+                      0.030 + 0.045 * (r1 - 0.55) / 0.45)
             dx, dy = math.cos(a) * s, math.sin(a) * s * 0.30
             flat_polygon(painter, cam,
                          [V3(x - dx, y - dy, 0.06), V3(x + dx, y + dy, 0.06),
@@ -279,13 +279,13 @@ class LilyPad3D:
         base = shade((62, 126, 66), self.tone)
         # 柔光叶影(投影在叶面下方的水面上)
         soft_shadow(painter, cam, V3(self.pos.x + 4, self.pos.y + 5, 0.25),
-                    self.r * 1.12, self.r * 1.02, 1.0, bias=-4, layer=3)
+                    self.r * 1.02, self.r * 0.94, 0.72, bias=-4, layer=3)
         # 叶缘厚度：略大一圈的深色叶子垫在下面, 露出一点点边
         flat_polygon(painter, cam, [V3(p.x + 1.6, p.y + 2.0, p.z - 0.35)
                                     for p in self.leaf_pts(z, 1.045)],
                      shade(base, 0.52), bias=-1.5, layer=3)
         dome(painter, cam, self.leaf_pts(z), base, bias=-1.0, layer=3,
-             outline=shade(base, 0.62), owidth=2, sheen=0.30)
+             outline=shade(base, 0.70), owidth=2, sheen=0.20)
         flat_polygon(painter, cam, self.leaf_pts(z, 0.86), add_light(base, 0.10),
                      bias=0.5, layer=3)
         # 叶脉：由叶心向叶缘放射, 越靠边越淡
@@ -313,7 +313,7 @@ class LilyPad3D:
             a = self.notch + 2.2 + i * 0.24
             rim.append(V3(self.pos.x + math.cos(a) * self.r * 0.99,
                           self.pos.y + math.sin(a) * self.r * 0.91, z + 0.14))
-        polyline(painter, cam, rim, mix(base, (198, 232, 160), 0.55), 2, layer=3)
+        polyline(painter, cam, rim, mix(base, (198, 232, 160), 0.34), 2, layer=3)
         if self.flower:
             self._draw_flower(painter, cam, z)
 
@@ -550,7 +550,7 @@ def draw_bank_base(painter, cam, props):
         steps = 6
         for i in range(steps):                         # 由近及远的雾化渐变草地
             f0, f1 = i / steps, (i + 1) / steps
-            col = mix(MEADOW, (150, 172, 138), f0 ** 1.4 * 0.85)
+            col = mix(MEADOW, (132, 156, 116), f0 ** 1.15 * 0.55)
             if side in ("n", "s"):
                 a0 = near + (far - near) * f0
                 a1 = near + (far - near) * f1
@@ -582,8 +582,8 @@ def draw_bank_base(painter, cam, props):
         sphere(painter, cam, V3(px, py, h + 0.35), pr, (196, 182, 156), layer=3)
     for (rx, ry, rr, rcol) in props["rocks"]:             # 岩石
         soft_shadow(painter, cam, V3(rx + rr * 0.35, ry + rr * 0.30, h + 0.4),
-                    rr * 1.15, rr * 0.75, 0.85, bias=-0.4, layer=3)
-        sphere(painter, cam, V3(rx, ry, h + rr * 0.22), rr, rcol, layer=3)
+                    rr * 0.95, rr * 0.62, 0.62, bias=-0.4, layer=3)
+        sphere(painter, cam, V3(rx, ry, h + rr * 0.22), rr, rcol, layer=3, sheen=0.45)
         for k in range(2):                                # 岩面斑点
             a = 1.1 + k * 2.0
             sphere(painter, cam,
@@ -592,20 +592,20 @@ def draw_bank_base(painter, cam, props):
     for (bx, by, br, bc) in props["bushes"]:              # 灌木丛（主球 + 次球簇）
         if br > 42:
             soft_shadow(painter, cam, V3(bx + br * 0.3, by + br * 0.25, h + 0.4),
-                        br * 1.05, br * 0.7, 0.8, bias=-0.4, layer=3)
+                        br * 0.88, br * 0.58, 0.58, bias=-0.4, layer=3)
         blobs = ((0.0, 0.0, 1.0, 0.0), (0.55, 0.15, 0.58, 0.10),
                  (-0.5, -0.16, 0.5, -0.06), (0.12, -0.5, 0.46, 0.06))
         for dx, dy, k, lift in blobs:
-            col = mix(bc, (18, 34, 20), 0.22) if lift < 0 else add_light(bc, 0.10 * k)
+            col = mix(bc, (18, 34, 20), 0.14) if lift < 0 else add_light(bc, 0.07 * k)
             sphere(painter, cam,
                    V3(bx + dx * br, by + dy * br, h + br * (0.72 + lift)),
-                   br * k, col, layer=3)
+                   br * k, col, layer=3, sheen=0.35)
         for k in range(2):                                # 叶簇纹理
             a = 0.7 + k * 1.26
             sphere(painter, cam,
                    V3(bx + math.cos(a) * br * 0.62, by + math.sin(a) * br * 0.5,
                       h + br * (0.85 + 0.08 * math.sin(a))),
-                   br * 0.17, add_light(bc, 0.22), bias=0.3, layer=3)
+                   br * 0.17, add_light(bc, 0.16), bias=0.3, layer=3, sheen=0.4)
 
 
 def draw_bank_plants(painter, cam, t, props):

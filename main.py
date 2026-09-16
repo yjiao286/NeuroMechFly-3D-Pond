@@ -22,9 +22,9 @@ import pygame
 
 import scenery
 from fly_brain import FlyBrain
-from render3d import (Camera3D, Painter, V3, add_light, clamp, dome, ellipse_pts,
-                      flat_polygon, mix, polyline, segment, shade, soft_shadow,
-                      sphere)
+from render3d import (Camera3D, Painter, V3, add_light, blob, clamp, dome,
+                      ellipse_pts, flat_polygon, limb, mix, polyline, segment,
+                      shade, soft_shadow, sphere)
 from sounds import SoundKit
 
 W, H = 1280, 800
@@ -170,73 +170,130 @@ class Frog:
                     self.tongue = None
         return landed
 
+    def _body_pts(self, z, scale=1.0):
+        """俯视轮廓：前段收窄、后段饱满的青蛙体型(单条闭合多边形，不再是同心椭圆)。"""
+        x, y, h = self.pos.x, self.pos.y, self.heading
+        n = 26
+        pts = []
+        for i in range(n):
+            a = 2 * math.pi * i / n
+            fwd, side = math.cos(a), math.sin(a)
+            rx = 37.0 * (1.0 + 0.13 * max(0.0, -fwd) - 0.11 * max(0.0, fwd))
+            ry = 24.0 * (1.0 + 0.10 * max(0.0, -fwd) - 0.08 * max(0.0, fwd))
+            ex, ey = rot2(fwd * rx * scale, side * ry * scale, h)
+            pts.append(V3(x + ex, y + ey, z))
+        return pts
+
+    def _local(self, lx, ly, lz=None):
+        """身体局部坐标(前=+x, 侧=+y) → 世界坐标。"""
+        ex, ey = rot2(lx, ly, self.heading)
+        return V3(self.pos.x + ex, self.pos.y + ey,
+                  self.z + lz if lz is not None else self.z)
+
+    def _hind_leg(self, painter, cam, side, gz, swing, airborne, skin, dark):
+        """后腿：股 → 胫 → 跗，折成青蛙特有的 Z 形，末端是四趾蹼足。"""
+        knee_out = -0.9 * swing * side
+        hip = self._local(-8, side * 15, 9.5)
+        if airborne:
+            knee = self._local(-38, side * 24, 8.0)
+            ankle = self._local(-18, side * 33, 6.5)
+            toe = self._local(12, side * 30, 6.0)
+        else:
+            knee = self._local(-31 + knee_out, side * 34, 6.5)
+            ankle = self._local(-5 + swing * 0.6, side * 40, gz - self.z + 2.0)
+            toe = self._local(17 + swing * 0.9, side * 35, gz - self.z + 1.0)
+        # 股部：贴在大腿上的扁平肌肉块(椭圆), 比一根粗筒自然得多
+        femur_ang = math.atan2(knee.y - hip.y, knee.x - hip.x)
+        thigh = hip.lerp(knee, 0.48)
+        blob(painter, cam, thigh.x, thigh.y, hip.z - 4.0, 15.5, 9.5, 9.0,
+             mix(skin, dark, 0.16), heading=femur_ang, layers=9, taper=0.40, bias=0.55)
+        limb(painter, cam, knee, ankle, 6.4, skin, bias=0.3, taper=0.58)
+        limb(painter, cam, ankle, toe, 5.0, mix(skin, dark, 0.18), bias=0.2, taper=0.6)
+        for k in range(4):                                  # 蹼趾：从跗端向前扇开
+            ta = self.heading + side * (0.52 - k * 0.34)
+            tip = V3(toe.x + math.cos(ta) * 15, toe.y + math.sin(ta) * 15, toe.z)
+            limb(painter, cam, toe, tip, 3.1, mix(skin, dark, 0.28), bias=0.1, taper=0.5)
+        web = [toe]                                         # 趾间蹼：薄扇形膜, 让后足读作"桨"
+        for k in (0, 3):
+            ta = self.heading + side * (0.52 - k * 0.34)
+            web.append(V3(toe.x + math.cos(ta) * 13.0, toe.y + math.sin(ta) * 13.0, toe.z - 0.2))
+        flat_polygon(painter, cam, web, mix(skin, dark, 0.5), bias=0.05)
+
+    def _front_leg(self, painter, cam, side, gz, swing, airborne, skin, dark):
+        """前腿：肩 → 肘 → 腕，三趾。"""
+        if airborne:
+            elbow = self._local(30, side * 26, 5.0)
+            wrist = self._local(42, side * 18, 3.0)
+        else:
+            elbow = self._local(28, side * 22, 3.0)
+            wrist = self._local(42 + swing * 0.5 * side, side * 15, gz - self.z + 1.0)
+        shoulder = self._local(19, side * 13, 7.5)
+        limb(painter, cam, shoulder, elbow, 6.2, mix(skin, dark, 0.3), bias=0.4)
+        limb(painter, cam, elbow, wrist, 4.6, skin, bias=0.2)
+        for k in range(3):
+            ta = self.heading + side * (0.42 - k * 0.42)
+            tip = V3(wrist.x + math.cos(ta) * 9, wrist.y + math.sin(ta) * 9, wrist.z)
+            limb(painter, cam, wrist, tip, 2.7, mix(skin, dark, 0.25), bias=0.1, taper=0.5)
+
     def draw(self, painter, cam, t, pads):
         x, y = self.pos
         h = self.heading
         z = self.z
         gz = ground_z(self.pos, pads, t)
         s = 1.0 - self.z / 170.0
-        soft_shadow(painter, cam, V3(x + 7, y + 4, gz + 0.18), 40 * s, 30 * s,
-                    1.05, bias=-4)
         swing = math.sin(self.walk_phase) * 9 if self._moving and self.state == "ground" else 0.0
         airborne = self.state == "air"
-        leg_c = (52, 96, 46)
-        skin = (108, 172, 76)                       # 主色（背部受光面）
-        skin_dark = (74, 128, 56)                   # 阴影/边缘
+        skin = (98, 162, 70)                        # 背部主色
+        skin_dark = (58, 104, 44)                   # 阴影/边缘
+        leg_skin = (88, 146, 62)
+        soft_shadow(painter, cam, V3(x + 8, y + 5, gz + 0.18), 44 * s, 33 * s, 0.78, bias=-4)
+        # 远侧腿先画, 近侧腿后画——深度排序会自动区分, 这里只给一点点偏置
         for side in (-1, 1):
-            # 后腿股（大块肌肉，贴着身体）+ 脚蹼
-            hx, hy = rot2(-14, side * 22, h)
-            sphere(painter, cam, V3(x + hx, y + hy, z + 11), 14, (88, 146, 64), bias=0.4)
-            fx, fy = rot2(-30 + (swing if side > 0 else -swing) * 0.5, side * 38, h)
-            foot_z = gz + 0.15 if not airborne else self.z * 0.3 + 3
-            dome(painter, cam, ellipse_pts(x + fx, y + fy, foot_z, 12, 7.6, h),
-                 (72, 126, 54), bias=0.2, sheen=0.18)
-            # 前腿 + 三趾；bias 让腿根藏进身体下不穿模
-            sx2, sy2 = rot2(20, side * 15, h)
-            ffx, ffy = rot2(32 + (swing if side > 0 else -swing) * 0.4, side * 28, h)
-            shoulder = V3(x + sx2, y + sy2, z + 7)
-            foot = V3(x + ffx, y + ffy, foot_z)
-            segment(painter, cam, shoulder, foot, shade(leg_c, 0.85), 6, bias=2.5)
-            segment(painter, cam, shoulder, foot, leg_c, 3, bias=2.45)
-            for k in range(3):
-                ta = h + side * 0.35 + (k - 1) * 0.32
-                toe = V3(x + ffx + math.cos(ta) * 7, y + ffy + math.sin(ta) * 7, foot_z)
-                segment(painter, cam, foot, toe, leg_c, 2, bias=2.5)
-        # 身体穹顶：受光渐变 + 背脊高光 + 迷彩斑点 + 边缘描线
-        dome(painter, cam, ellipse_pts(x, y, z + 8, 41, 30, h), skin, bias=0.2,
-             outline=shade(skin, 0.62), owidth=2, sheen=0.34)
+            self._hind_leg(painter, cam, side, gz, swing, airborne, leg_skin, skin_dark)
+        for side in (-1, 1):
+            self._front_leg(painter, cam, side, gz, swing, airborne, leg_skin, skin_dark)
+        # 身体：多层椭球体(有厚度), 再加一层略大的深色轮廓当投影边
+        flat_polygon(painter, cam, self._body_pts(z + 4.0, 1.03), shade(skin_dark, 0.9),
+                     bias=-1.2)
+        blob(painter, cam, x, y, z + 4.2, 36.0, 23.5, 12.5, skin, heading=h,
+             layers=14, taper=0.38, bias=0.3)
         for (sx, sy), sr in self.skin_spots:                       # 迷彩斑点
-            ex, ey = rot2(sx, sy, h)
+            ex, ey = rot2(sx * 0.92, sy * 0.92, h)
             flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, z + 8.4, sr, sr * 0.72, h),
-                         mix(skin_dark, skin, 0.25), bias=0.3)
-        ridge = []
-        for i in range(7):                                         # 背脊高光带
+                         mix(skin_dark, skin, 0.30), bias=0.4)
+        ridge = []                                                 # 背脊高光
+        for i in range(7):
             f = i / 6
-            rx2, ry2 = rot2(-30 + 58 * f, math.sin(f * math.pi) * 3.5, h)
-            ridge.append(V3(x + rx2, y + ry2, z + 12.4))
-        polyline(painter, cam, ridge, add_light(skin, 0.34), 2)
-        dome(painter, cam, ellipse_pts(x, y, z + 11, 30, 21, h), add_light(skin, 0.10),
-             bias=0.5, sheen=0.22)
-        for bx, by, br in ((-9, -10, 8), (7, 9, 9), (-22, 3, 6), (16, -6, 6)):
+            rx2, ry2 = rot2(-26 + 50 * f, math.sin(f * math.pi) * 3.0, h)
+            ridge.append(V3(x + rx2, y + ry2, z + 12.6))
+        polyline(painter, cam, ridge, add_light(skin, 0.26), 2)
+        for bx, by, br in ((-10, -9, 7), (6, 8, 8), (-20, 2, 5), (14, -5, 5)):
             ex, ey = rot2(bx, by, h)
-            flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, z + 9.6, br, br * 0.7, h),
-                         mix(skin_dark, skin, 0.18), bias=0.4)
-        # 头 + 嘴线
-        hxp, hyp = rot2(32, 0, h)
-        dome(painter, cam, ellipse_pts(x + hxp, y + hyp, z + 12, 23, 17, h),
-             add_light(skin, 0.05), bias=0.6, outline=shade(skin, 0.58), owidth=2,
-             sheen=0.30)
-        m1x, m1y = rot2(48, -11, h)
-        m2x, m2y = rot2(48, 11, h)
-        segment(painter, cam, V3(x + m1x, y + m1y, z + 10), V3(x + m2x, y + m2y, z + 10),
-                shade(skin, 0.42), 2)
-        # 金色眼睛：头顶前部一对鼓包，带深色竖瞳
+            flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, z + 9.7, br, br * 0.7, h),
+                         mix(skin_dark, skin, 0.22), bias=0.45)
+        # 头：比身体更宽的椭球, 与身体在肩部自然搭接；前端再收一个短吻
+        blob(painter, cam, self._local(25, 0).x, self._local(25, 0).y, z + 4.4,
+             21.5, 22.5, 11.0, add_light(skin, 0.03), heading=h, layers=11, taper=0.42,
+             bias=0.6)
+        blob(painter, cam, self._local(40, 0).x, self._local(40, 0).y, z + 4.4,
+             14.0, 15.5, 8.5, add_light(skin, 0.05), heading=h, layers=8, taper=0.45,
+             bias=0.7)
+        mouth = [self._local(38, -14, 10.4), self._local(45, -7.5, 10.7),
+                 self._local(47, 0, 10.8), self._local(45, 7.5, 10.7),
+                 self._local(38, 14, 10.4)]
+        polyline(painter, cam, mouth, shade(skin, 0.46), 2)
+        for side in (-1, 1):                                       # 鼻孔
+            n0 = self._local(43, side * 3.0, 12.0)
+            sphere(painter, cam, n0, 1.1, shade(skin, 0.52), bias=0.8, sheen=0.4)
+        # 眼睛：头前角的一对鼓包, 鼓包压在眼珠下面(眼珠"长"在头上, 不是浮在头顶)
         for side in (-1, 1):
-            ex, ey = rot2(28, side * 9, h)
-            sphere(painter, cam, V3(x + ex, y + ey, z + 17), 8.4, (246, 206, 74), bias=0.5)
-            px, py = rot2(33, side * 8, h)
-            sphere(painter, cam, V3(x + px, y + py, z + 17.6), 2.9, (34, 28, 22), bias=0.7)
-            sphere(painter, cam, V3(x + px, y + py, z + 22.6), 1.1, (250, 246, 232), bias=0.72)
+            bulge = self._local(32, side * 13.0)
+            blob(painter, cam, bulge.x, bulge.y, z + 4.6, 12.5, 11.0, 6.5,
+                 mix(skin, skin_dark, 0.22), heading=h, layers=7, taper=0.40, bias=0.72)
+            eye = self._local(33, side * 13.6, 14.6)
+            sphere(painter, cam, eye, 7.2, (216, 184, 90), bias=0.85, sheen=0.5)
+            pupil = self._local(36.8, side * 13.8, 15.0)
+            sphere(painter, cam, pupil, 2.6, (44, 34, 26), bias=0.95, sheen=0.3)
         # 舌头（红色圆珠链，每颗独立深度）
         if self.tongue and self.tongue["tip"]:
             tip = self.tongue["tip"]
@@ -305,7 +362,7 @@ class FlyBase:
 
         # 影子贴地（不穿进荷叶：影子高度=地面高度）
         soft_shadow(painter, cam, V3(x + 3 * sh, y + 2 * sh, gz + 0.16),
-                    10 * sh, 6.2 * sh, 0.9, bias=-4)
+                    9.4 * sh, 5.6 * sh, 0.62, bias=-4)
         # 六足: 髋→膝→足 三点两段, 各状态独立步态
         legs = (
             ((2.4, -1.6), (6.2, -3.8), (9.0, -5.6)),
