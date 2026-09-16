@@ -1,3 +1,6 @@
-# 可选：EPFL NeuroMechFly 真实果蝇神经力学模型（Python 3.12 以上）
+# 可选：EPFL NeuroMechFly 真实果蝇神经力学模型（需要 Python 3.12+）
 # Optional: EPFL NeuroMechFly, the real fruit-fly neuromechanical model (Python 3.12+)
+#
+# 装完跑：.venv-flygym/bin/python real_fly_demo.py
+# 想要 GPU 并行仿真：flygym[warp]；想训练运动策略：flygym[rl]
 flygym==2.1.0

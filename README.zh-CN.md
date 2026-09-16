@@ -20,6 +20,10 @@
   **双层绘制顺序**，让青蛙站在大片地面多边形远侧时也不会被地面吞掉（不穿模）。
 - **只有一只果蝇有大脑** —— 一个轻量 LIF 脉冲神经网络决定它的逃逸、巡游与进食；
   按 `B` 可以实时看到膜电位充放电的全过程。
+- **真的果蝇也在这个仓库里** —— 还安装并渲染了 EPFL 的
+  [FlyGym](https://neuromechfly.org) / **NeuroMechFly**：micro-CT 扫描的真实身体、
+  126 个关节自由度、足端附着执行器、每只复眼 721 个小眼。
+  见[真·果蝇](#-真果蝇flygym--neuromechfly)一节。
 - **动作细节丰富的果蝇** —— 三节分节腹部、髋膝足两段式关节腿、带翅脉双翅；
   飞行、三角步态行走、进食（前足搭在碎屑上搓动）、梳洗（前足擦复眼，真实果蝇行为）
   各有专属动画。
@@ -75,6 +79,76 @@ python -m venv .venv
 另外八只（`ScriptedFly`）是航点式脚本行为：觅食 → 降落啃食，青蛙靠近 110 内拔腿就逃；
 神经元果蝇的反应距离远得多。
 
+## 🧬 真·果蝇：FlyGym / NeuroMechFly
+
+游戏里的果蝇是手写的卡通模型，大脑只有 4 个脉冲神经元。**真实的果蝇**只差一条命令：
+这个仓库安装并渲染了 [FlyGym](https://neuromechfly.org)——EPFL 的 **NeuroMechFly**，
+运动感觉神经科学与视觉研究用的果蝇神经力学模型（NeuroMechFly v2，*Nature Methods* 2024）。
+
+![NeuroMechFly：真果蝇模型，由 MuJoCo 组装并离屏渲染](docs/images/neuromechfly.png)
+
+*由 `real_fly_demo.py` 用自带的 micro-CT 网格组装、MuJoCo 离屏渲染——没有任何游戏素材。
+翅膀是半透明的，复眼就是那对真实的红色复眼。*
+
+### 力学：一只有关节、有附着、能推拉的果蝇
+
+| 项目 | 模型里的实现 |
+|---|---|
+| **身体** | **micro-CT 扫描真果蝇**得到的 70 个体节：头与口器、触角（梗节/鞭节/芒）、六节腹部、平衡棒、翅、六条七节腿 |
+| **关节** | **126 个转动自由度**，每个关节带刚度、阻尼与 armature。`JointPreset.ALL_BIOLOGICAL` 给每条腿 11 个自由度（coxa 3、trochanterfemur 2、tibia 1、tarsus1~5 各 1；远端跗节关节是被动的，和真果蝇一致） |
+| **执行器** | demo 里共 **132 个**：每个自由度一个位置执行器（等价于肌肉的代理，官方教程用 CPG / 逆运动学 / RL 去驱动），外加 **6 个 tarsus5 足端附着执行器**——控制量 0→1 就是"抓住"或"松开"表面 |
+| **接触** | 可按体节配置接触预设、逐腿接地传感器，以及逐体节接触力读数 |
+| **物理** | MuJoCo 3.9，1 ms 步长；`flygym[warp]` 可换成 MuJoCo-Warp 后端，并行跑上千只果蝇 |
+
+同一套 API 还带两个身体模型：**FlyBody**（Turaga 实验室，*Nature* 2025）用肌腱执行器补上
+翅膀 pitch/roll/yaw 与腹部自由度，关节参数按生物力学标定；
+**FlyMimic / `MusculoskeletalFly`** 用 **15 条 Hill 型肌肉 + 15 条空间肌腱**驱动左前腿。
+
+### 神经：感觉 → 环路 → 肌肉
+
+FlyGym 首先是一个神经科学平台：神经环路需要的每一条通道都暴露出来。
+
+- **视觉** —— `add_vision()` 在左右复眼各放一个相机：**视场角 157°、每只眼 721 个小眼**，
+  六边形采样与鱼眼畸变都按真实光学参数标定；读数按黄型/淡型两类小眼分开返回。
+- **本体感觉** —— 全部 126 个自由度的关节角与角速度，以及身体、关节 site 的位姿。
+- **机械感觉** —— 逐体节的接触力，也就是"每只脚现在踩到了什么"。
+- **运动侧** —— 126 路关节目标 + 6 路附着通道；FlyBody 里连的是已发表的
+  连接组推导出的运动神经元 → 肌肉映射，这正是"全身体 + 精确神经肌肉连接"的含义。
+
+![果蝇复眼看到的世界：鱼眼相机视图与 721 个小眼读数](docs/images/fly-vision.png)
+
+*左：左眼相机（已做鱼眼校正）——能看到果蝇自己的前腿与方块地形。
+右：同一帧经过 721 个小眼阵列采样后的读数，R = 黄型小眼、G = 淡型小眼。
+果蝇大脑真正拿到的就是这张六边形图，而不是一张矩形照片。*
+
+### 跑起来
+
+```bash
+python3.12 -m venv .venv-flygym                    # flygym 2.1.0 需要 Python 3.12+
+.venv-flygym/bin/pip install -r requirements-flygym.txt
+.venv-flygym/bin/python real_fly_demo.py           # 生成上面两张图
+```
+
+脚本同时会打印它组装出来的模型：
+
+```
+NeuroMechFly: 70 个体节 / 126 个关节自由度 / 132 个执行器（含 6 个足端附着）/ 2 个复眼相机
+```
+
+游戏里的果蝇靠纯 pygame 跑 60 FPS，这只是物理仿真：每渲染一帧要一两秒，第一次运行时
+Numba 还要 JIT 编译视网膜采样（约一分钟）。想要 GPU 后端装 `pip install "flygym[warp]"`；
+想要用它训练运动策略装 `"flygym[rl]"`（Gymnasium + Stable-Baselines3）。
+
+### 游戏果蝇 vs 真模型
+
+| | 游戏里的果蝇（[`fly_brain.py`](fly_brain.py)） | FlyGym / NeuroMechFly |
+|---|---|---|
+| 身体 | 几十个手写多边形 | 70 个 micro-CT 网格 |
+| "大脑" | 4 个 LIF 神经元（GF / CX_L / CX_R / REST） | 由你接任意环路——模型提供身体、感官与肌肉 |
+| 视觉 | 无，靠距离判断 | 每只眼 721 个小眼，六边形采样 + 鱼眼畸变 |
+| 时间 | 60 FPS 实时 | MuJoCo 物理，1 ms 步长 |
+| 用途 | 游戏 | 神经科学 / 生物力学 / 强化学习 |
+
 ## 觅食机制
 
 荷叶上会随机长出**食饵碎屑**（棕色颗粒）。果蝇闻味赶来、悬停，再由神经/脚本逻辑决定
@@ -116,7 +190,7 @@ python -m venv .venv
 | [`fly_brain.py`](fly_brain.py) | 果蝇脉冲神经网络大脑（LIF 神经元，子步进数值积分） |
 | [`scenery.py`](scenery.py) | 水面/焦散/涟漪/荷叶荷花/食饵、沙岸堤壁、岩石草丛、芦苇香蒲、灌木丛、天空 |
 | [`sounds.py`](sounds.py) | 程序化合成音效 |
-| [`real_fly_demo.py`](real_fly_demo.py) | （实验）EPFL NeuroMechFly 真实果蝇模型渲染脚本，见下方说明 |
+| [`real_fly_demo.py`](real_fly_demo.py) | 组装 EPFL NeuroMechFly（关节/执行器/附着/复眼）并渲染出上面两张图 |
 
 ## 回归测试
 
@@ -139,18 +213,11 @@ python -m venv .venv
 
 ## 关于"真实的果蝇大脑模型"
 
-游戏 NPC 用的是轻量环路 SNN（60 FPS 实时）。此外
-[NeuroMechFly (flygym)](https://neuromechfly.org)——EPFL 的**真实果蝇神经力学模型**
-可以在 Python 3.12 + MuJoCo 环境中安装：
-
-```bash
-python3.12 -m venv .venv-flygym
-.venv-flygym/bin/pip install -r requirements-flygym.txt
-.venv-flygym/bin/python real_fly_demo.py     # 输出 real_fly.png
-```
-
-注意：flygym 2.1.0 刚发布、API 与官方教程差异较大，`real_fly_demo.py`（组包渲染真·果蝇）
-目前在库内部 `compose/base.py` 的传感器命名处报错，属上游问题，建议等补丁或按官方教程调整。
+完整的 FlyGym / NeuroMechFly 安装方式、力学与神经接口、两张渲染图都在上面的
+[真·果蝇](#-真果蝇flygym--neuromechfly)一节。这里只再强调一个坑：FlyGym 2.1.0 的逐腿
+接地传感器引用了错误的元素名，所以 `real_fly_demo.py` 里传了
+`add_ground_contact_sensors=False` 绕开它——那是上游 bug，不是本仓库的问题；
+接触力仍然可以用 `get_bodysegment_contact_forces()` 读到。
 
 ## 已知限制
 
