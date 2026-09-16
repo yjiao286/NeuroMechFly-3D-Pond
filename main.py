@@ -310,11 +310,11 @@ class Frog:
         身体是有厚度的椭球, 放到水面会被透视推到身后, 看起来像掉在水里。
         """
         if hind:
-            lx, ly = -9.0 + 2.0 * kick, side * (19.0 + 1.0 * abs(kick))
-            foot_len, toe_frac, bias = FOOT_LEN_HIND, TOE_FRAC_HIND, 0.15
+            lx, ly = -9.0 + 2.0 * kick, side * (20.0 + 1.0 * abs(kick))
+            foot_len, toe_frac, bias = FOOT_LEN_HIND, TOE_FRAC_HIND, 1.6
         else:
-            lx, ly = 16.0, side * 11.0
-            foot_len, toe_frac, bias = FOOT_LEN_FRONT, TOE_FRAC_FRONT, 0.22
+            lx, ly = 16.0, side * 12.0
+            foot_len, toe_frac, bias = FOOT_LEN_FRONT, TOE_FRAC_FRONT, 1.5
         ex, ey = rot2(lx, ly, self.heading)
         wx, wy, z = self.pos.x + ex, self.pos.y + ey, self.z + 2.5
         p0 = cam.project(V3(wx, wy, z))
@@ -330,9 +330,9 @@ class Frog:
         img = pygame.transform.smoothscale(foot_sprite(144, hind), (px, px))
         rect = img.get_rect()
         rect.center = (int(sx), int(sy))            # 图心 = 脚踝, 直接以投影点为中心
-        # 放在 BANK 层(3): 永远在身体(4)之下, 但可以和荷叶按深度正确互遮
+        # 与身体同层但 bias 更大 → 永远画在身体之后(之上): 身体无论怎么转都不会盖住脚
         painter.add(depth - bias, lambda s, img=img, rect=rect: s.blit(img, rect),
-                    Painter.BANK)
+                    Painter.MAIN)
 
     def draw(self, painter, cam, t, pads):
         x, y = self.pos
