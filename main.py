@@ -303,12 +303,11 @@ class Frog:
                   self.z + lz if lz is not None else self.z)
 
     def _foot(self, painter, cam, side, hind=True, kick=0.0):
-        """把预渲染的脚精灵按投影朝向旋转、按景深缩放后贴进场景。
+        """把预渲染的脚精灵贴进场景：**只按景深缩放, 绝不旋转**。
 
-        后足：五趾 + 趾间蹼, 长 40 单位, 长在身体后侧、朝外前方张开(青蛙的桨)。
-        前足：四趾无蹼, 长 24 单位(约后足的 0.6 倍), 长在肩侧、朝前外撑地——
-        这是真实青蛙的比例关系。脚画在身体下缘的高度而不是水面: 身体是有厚度的
-        椭球, 放到水面会被透视推到身后, 看起来像掉在水里。
+        后足：五趾 + 趾间蹼, 长 16 单位(约体长 0.22)；前足：四趾无蹼, 长 10 单位
+        (约后足的 0.6 倍)——真实青蛙的比例关系。脚画在身体下缘的高度而不是水面:
+        身体是有厚度的椭球, 放到水面会被透视推到身后, 看起来像掉在水里。
         """
         if hind:
             lx, ly = -9.0 + 2.0 * kick, side * (19.0 + 1.0 * abs(kick))
@@ -322,17 +321,13 @@ class Frog:
         if p0 is None:
             return
         sx, sy, depth = p0
-        # 朝向：两只脚都指向青蛙前进方向(投影到屏幕), 不再各自向外扇——所以看着不"拧"
-        fx_, fy_ = math.cos(self.heading), math.sin(self.heading)
-        p1 = cam.project(V3(wx + fx_ * 24.0, wy + fy_ * 24.0, z))
-        if p1 is None:
-            return
-        theta = math.degrees(math.atan2(p1[1] - sy, p1[0] - sx)) + 90.0
         # 精灵整幅对应的世界长度 = 实际脚长 / 趾尖占比 → 屏上大小正好是这只脚的尺寸
         target = (foot_len / toe_frac) * cam.focal / depth
         if target < 4:
             return
-        img = pygame.transform.rotozoom(foot_sprite(144, hind), theta, target / 144.0)
+        # 完全不旋转: 不管青蛙朝哪、镜头怎么转, 脚永远是同一个朝向, 只按景深缩放
+        px = max(4, int(target))
+        img = pygame.transform.smoothscale(foot_sprite(144, hind), (px, px))
         rect = img.get_rect()
         rect.center = (int(sx), int(sy))            # 图心 = 脚踝, 直接以投影点为中心
         # 放在 BANK 层(3): 永远在身体(4)之下, 但可以和荷叶按深度正确互遮
