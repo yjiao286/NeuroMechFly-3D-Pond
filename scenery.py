@@ -13,7 +13,8 @@ import random
 import pygame
 
 from render3d import (LIGHT_XY, V3, add_light, clamp, dome, flat_polygon, mix,
-                      polyline, segment, shade, soft_shadow, sphere)
+                      polyline, segment, shade, soft_shadow, sphere,
+                      Painter)
 
 POND_W2, POND_H2 = 620, 350          # 池塘半宽 / 半高（世界单位）
 WATER_S = (30, 76, 66)               # 近岸水色（南）
@@ -39,6 +40,78 @@ def _hash01(i, j, k=0):
     n &= 0xFFFFFFFF
     n = (n ^ (n >> 13)) * 1274126177 & 0xFFFFFFFF
     return ((n ^ (n >> 16)) & 0xFFFF) / 65535.0
+
+
+# ---------------------------------------------------------------- 有机岸线
+_SHORE_BASE = None
+
+
+def _shore_base():
+    """静态有机池岸：96 个 (x, y, nx, ny, s)。
+
+    把矩形水边界沿内法线做不均匀收缩(三种频率的正弦叠加)，得到不规则但
+    平滑的池边；nx/ny 指向池心，s 是归一化周长参数。确定性生成，不随帧变化。
+    收缩量限制在 14~56，保证水线永远在游戏活动区(±545/±285)之外。
+    """
+    global _SHORE_BASE
+    if _SHORE_BASE is None:
+        pts = []
+        pw, ph = POND_W2, POND_H2
+        w, per = 2 * pw, 4 * pw + 4 * ph
+        for i in range(96):
+            s = i / 96
+            d = s * per
+            if d < w:                                   # 南边
+                bx, by, nx, ny = -pw + d, -ph, 0, 1
+            elif d < w + 2 * ph:                        # 东边
+                bx, by, nx, ny = pw, -ph + (d - w), -1, 0
+            elif d < 2 * w + 2 * ph:                    # 北边
+                bx, by, nx, ny = pw - (d - w - 2 * ph), ph, 0, -1
+            else:                                       # 西边
+                bx, by, nx, ny = -pw, ph - (d - 2 * w - 2 * ph), 1, 0
+            inset = (30 + 17 * math.sin(s * math.tau * 2 + 1.3)
+                     + 9 * math.sin(s * math.tau * 5 + 4.1)
+                     + 5 * math.sin(s * math.tau * 9 + 2.2))
+            inset = clamp(inset, 14, 56)
+            pts.append((bx + nx * inset, by + ny * inset, nx, ny, s))
+        _SHORE_BASE = pts
+    return _SHORE_BASE
+
+
+def shore_line(t):
+    """某一时刻的水线：静态岸线加轻微吞吐(两簇不同频率的呼吸波)。"""
+    out = []
+    for (bx, by, nx, ny, s) in _shore_base():
+        lap = (2.4 * math.sin(s * math.tau * 3 - t * 1.05)
+               + 1.3 * math.sin(s * math.tau * 7 + t * 0.7))
+        out.append((bx + nx * lap, by + ny * lap, nx, ny, s))
+    return out
+
+
+def inside_shore(px, py):
+    """点是否在静态水线以内(射线法)。布景(浮萍等)用它在岸边留白。"""
+    pts = _shore_base()
+    inside = False
+    n = len(pts)
+    for i in range(n):
+        x1, y1 = pts[i][0], pts[i][1]
+        x2, y2 = pts[(i + 1) % n][0], pts[(i + 1) % n][1]
+        if (y1 > py) != (y2 > py):
+            xc = (x2 - x1) * (py - y1) / (y2 - y1) + x1
+            if px < xc:
+                inside = not inside
+    return inside
+
+
+def _beach_band(px, py, nx, ny):
+    """岸点沿外法线到堤壁的距离(多留 12 压进墙脚，防止露缝)。"""
+    if nx > 0:
+        return POND_W2 - px + 12
+    if nx < 0:
+        return px + POND_W2 + 12
+    if ny > 0:
+        return py + POND_H2 + 12
+    return POND_H2 - py + 12
 
 
 _CLOUD_CACHE = {}
@@ -125,13 +198,15 @@ def np_sin_mix(x, y):
 
 
 def water_color(x, y, t):
-    """水面底色：南北大气渐变 + 极缓的涌浪。
+    """水面底色：南北大气渐变 + 中心加深的深水区 + 极缓的涌浪。
 
     刻意不引入高频项——底色按大格绘制，格内是纯色，只有低频变化才不会露出格子接缝；
     高频的水纹交给上面那层小碎块与焦散闪点。"""
     f = (y + POND_H2) / (2 * POND_H2)
     base = _lerp_color(WATER_S, WATER_M, f * 2.0) if f < 0.5 \
         else _lerp_color(WATER_M, WATER_N, (f - 0.5) * 2.0)
+    r = math.hypot(x / POND_W2, y / POND_H2)          # 池心水深更大, 颜色更沉
+    base = _lerp_color(base, (24, 60, 52), 0.16 * clamp(1.12 - r, 0.0, 1.0))
     swell = math.sin(x * 0.0042 + t * 0.21) * math.sin(y * 0.0051 - t * 0.17)
     return mix(base, GLINT, 0.022 * swell + 0.010)
 
@@ -167,6 +242,18 @@ def draw_pond(painter, cam, t):
                          [V3(x - dx, y - dy, 0.06), V3(x + dx, y + dy, 0.06),
                           V3(x + dx, y + dy + 0.9, 0.06), V3(x - dx, y - dy + 0.9, 0.06)],
                          col, layer=1)
+    for k in range(18):                                   # 水下泥沙明暗斑(大而淡)
+        x = -POND_W2 + 80 + _hash01(k, 41, 31) * (2 * POND_W2 - 160)
+        y = -POND_H2 + 60 + _hash01(k, 42, 31) * (2 * POND_H2 - 120)
+        r = 46 + 90 * _hash01(k, 43, 31)
+        tone = (16, 44, 38) if _hash01(k, 44, 31) > 0.5 else GLINT
+        col = mix(water_color(x, y, t), tone, 0.10 + 0.06 * _hash01(k, 45, 31))
+        rot = _hash01(k, 46, 31) * math.tau
+        flat_polygon(painter, cam,
+                     [V3(x + math.cos(rot + a * 0.9) * r,
+                         y + math.sin(rot + a) * r * 0.68, 0.03)
+                      for a in [2 * math.pi * i / 8 for i in range(8)]],
+                     col, layer=1)
     for gx in range(36):                                  # 焦散闪点：小而淡, 避免悬浮感
         for gy in range(24):
             x = -POND_W2 + 1240 * gx / 35
@@ -181,18 +268,55 @@ def draw_pond(painter, cam, t):
                        V3(x - s * math.cos(a), y - s * math.sin(a), 0.16),
                        V3(x + s * math.sin(a), y - s * math.cos(a), 0.16)]
                 flat_polygon(painter, cam, pts, (int(k * 0.55), k, int(k * 0.8)), layer=1)
-    # 岸边泡沫：贴着四壁的一圈浅色水线，给池塘收个边
-    band = 13
-    for pts in ([V3(-POND_W2, POND_H2 - band, 0.2), V3(POND_W2, POND_H2 - band, 0.2),
-                 V3(POND_W2, POND_H2, 0.2), V3(-POND_W2, POND_H2, 0.2)],
-                [V3(-POND_W2, -POND_H2, 0.2), V3(POND_W2, -POND_H2, 0.2),
-                 V3(POND_W2, -POND_H2 + band, 0.2), V3(-POND_W2, -POND_H2 + band, 0.2)]):
-        flat_polygon(painter, cam, pts, mix(FOAM, WATER_S, 0.55), layer=1)
-    for pts in ([V3(-POND_W2, -POND_H2, 0.2), V3(-POND_W2 + band, -POND_H2, 0.2),
-                 V3(-POND_W2 + band, POND_H2, 0.2), V3(-POND_W2, POND_H2, 0.2)],
-                [V3(POND_W2 - band, -POND_H2, 0.2), V3(POND_W2, -POND_H2, 0.2),
-                 V3(POND_W2, POND_H2, 0.2), V3(POND_W2 - band, POND_H2, 0.2)]):
-        flat_polygon(painter, cam, pts, mix(FOAM, WATER_S, 0.62), layer=1)
+    # 会动的水线与浅水带：轻微吞吐, 画在 BANK 层(晚于机位缓存的静态沙滩与焦散)。
+    shore = shore_line(t)
+    n_s = len(shore)
+    for i in range(n_s):                                  # 浅水带: 靠岸 30 单位内的透亮水色
+        x0, y0, nx0, ny0, _ = shore[i]
+        x1, y1, nx1, ny1, _ = shore[(i + 1) % n_s]
+        flat_polygon(painter, cam,
+                     [V3(x0 + nx0 * 30, y0 + ny0 * 30, 0.05),
+                      V3(x1 + nx1 * 30, y1 + ny1 * 30, 0.05),
+                      V3(x1, y1, 0.05), V3(x0, y0, 0.05)],
+                     mix(water_color((x0 + x1) / 2, (y0 + y1) / 2, t),
+                         (176, 218, 200), 0.26), layer=Painter.BANK)
+    for i in range(n_s):                                  # 水线亮边(贴在水侧)
+        x0, y0, nx0, ny0, _ = shore[i]
+        x1, y1, nx1, ny1, _ = shore[(i + 1) % n_s]
+        flat_polygon(painter, cam,
+                     [V3(x0, y0, 0.34), V3(x1, y1, 0.34),
+                      V3(x1 + nx1 * 2.4, y1 + ny1 * 2.4, 0.34),
+                      V3(x0 + nx0 * 2.4, y0 + ny0 * 2.4, 0.34)],
+                     mix(FOAM, WATER_S, 0.30), layer=Painter.BANK)
+
+
+def draw_beach_base(painter, cam):
+    """静态湿沙滩带(水线→堤壁)与沙面湿痕：只跟机位有关, 供岸基缓存调用。"""
+    shore = _shore_base()
+    n_s = len(shore)
+    for i in range(n_s):                                  # 湿沙滩: 水线到堤壁之间的滩涂
+        x0, y0, nx0, ny0, _ = shore[i]
+        x1, y1, nx1, ny1, _ = shore[(i + 1) % n_s]
+        px0, py0 = x0 - nx0 * _beach_band(x0, y0, nx0, ny0), \
+            y0 - ny0 * _beach_band(x0, y0, nx0, ny0)
+        px1, py1 = x1 - nx1 * _beach_band(x1, y1, nx1, ny1), \
+            y1 - ny1 * _beach_band(x1, y1, nx1, ny1)
+        g1 = _hash01(i, 7, 51)
+        col = mix(SAND_WET, SAND, 0.30 + 0.42 * _hash01(i, 8, 52))
+        col = mix(col, (255, 250, 238) if g1 > 0.5 else (112, 94, 70),
+                  (g1 - 0.5 if g1 > 0.5 else 0.5 - g1) * 0.16)
+        flat_polygon(painter, cam,
+                     [V3(x0, y0, 0.3), V3(x1, y1, 0.3), V3(px1, py1, 0.3), V3(px0, py0, 0.3)],
+                     col, layer=Painter.WATER)
+    for i in range(n_s):                                  # 水线上方的常年湿痕(沙侧)
+        x0, y0, nx0, ny0, _ = shore[i]
+        x1, y1, nx1, ny1, _ = shore[(i + 1) % n_s]
+        flat_polygon(painter, cam,
+                     [V3(x0 - nx0 * 3.4, y0 - ny0 * 3.4, 0.33),
+                      V3(x1 - nx1 * 3.4, y1 - ny1 * 3.4, 0.33),
+                      V3(x1 - nx1 * 6.2, y1 - ny1 * 6.2, 0.33),
+                      V3(x0 - nx0 * 6.2, y0 - ny0 * 6.2, 0.33)],
+                     mix(FOAM, SAND_WET, 0.45), layer=Painter.WATER)
 
 
 class Ripples:
@@ -407,11 +531,16 @@ def make_pads(n=6):
 
 
 def make_duckweed(n=14):
-    """浮萍: 一簇簇的小圆叶漂在水面(参考真实池塘照片)。"""
+    """浮萍: 一簇簇的小圆叶漂在水面(参考真实池塘照片), 只落在水线以内。"""
     clusters = []
     for _ in range(n):
-        x = random.uniform(-POND_W2 + 40, POND_W2 - 40)
-        y = random.uniform(-POND_H2 + 40, POND_H2 - 40)
+        for _try in range(24):
+            x = random.uniform(-POND_W2 + 40, POND_W2 - 40)
+            y = random.uniform(-POND_H2 + 40, POND_H2 - 40)
+            if inside_shore(x, y):
+                break
+        else:
+            continue
         dots = [(random.uniform(-4.5, 4.5), random.uniform(-4.5, 4.5),
                  random.uniform(0.9, 2.0), random.uniform(0, math.tau)) for _ in range(random.randint(3, 6))]
         clusters.append({"x": x, "y": y, "dots": dots, "phase": random.uniform(0, math.tau)})

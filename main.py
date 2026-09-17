@@ -215,6 +215,8 @@ class Frog:
         rng = random.Random(9)
         self.skin_spots = [((rng.uniform(-34, 34), rng.uniform(-22, 22)), rng.uniform(3.0, 5.5))
                            for _ in range(6)]  # 迷彩色皮肤斑点(预生成防抖动)
+        self.blink_cd = random.uniform(2.0, 5.0)   # 眨眼倒计时
+        self.blink = 0.0                           # 眼皮闭合剩余时长
 
     def mouth_pos(self):
         mx, my = rot2(46, 0, self.heading)
@@ -223,6 +225,11 @@ class Frog:
     def update(self, dt, move, jump, tongue_cmd, tongue_target, ripples, sounds):
         landed = False
         self.cooldown = max(0.0, self.cooldown - dt)
+        self.blink_cd -= dt                        # 偶尔眨一下眼
+        if self.blink_cd <= 0:
+            self.blink = 0.13
+            self.blink_cd = random.uniform(2.5, 6.5)
+        self.blink = max(0.0, self.blink - dt)
         if self.state == "ground":
             self._moving = move.length_squared() > 0
             if self._moving:
@@ -283,15 +290,16 @@ class Frog:
         return landed
 
     def _body_pts(self, z, scale=1.0):
-        """俯视轮廓：前段收窄、后段饱满的青蛙体型(单条闭合多边形，不再是同心椭圆)。"""
+        """俯视轮廓：前窄后宽、肩部略收的"梨形"蛙体(单条闭合多边形)。"""
         x, y, h = self.pos.x, self.pos.y, self.heading
         n = 26
         pts = []
         for i in range(n):
             a = 2 * math.pi * i / n
             fwd, side = math.cos(a), math.sin(a)
-            rx = 37.0 * (1.0 + 0.13 * max(0.0, -fwd) - 0.11 * max(0.0, fwd))
-            ry = 24.0 * (1.0 + 0.10 * max(0.0, -fwd) - 0.08 * max(0.0, fwd))
+            rx = 37.0 * (1.0 + 0.16 * max(0.0, -fwd) ** 1.2 - 0.15 * max(0.0, fwd) ** 1.3)
+            ry = 23.5 * (1.0 + 0.08 * max(0.0, -fwd) - 0.09 * max(0.0, fwd)
+                         + 0.05 * side * side)
             ex, ey = rot2(fwd * rx * scale, side * ry * scale, h)
             pts.append(V3(x + ex, y + ey, z))
         return pts
@@ -302,41 +310,74 @@ class Frog:
         return V3(self.pos.x + ex, self.pos.y + ey,
                   self.z + lz if lz is not None else self.z)
 
-    def _foot(self, painter, cam, side, hind=True, kick=0.0):
-        """把预渲染的脚精灵贴进场景：**只按景深缩放, 绝不旋转**。
+    def _foot(self, painter, cam, anchor, phi, hind=True):
+        """把预渲染的脚精灵贴进场景：anchor=脚踝世界坐标, phi=脚趾指向的世界方位角。
 
-        后足：五趾 + 趾间蹼, 长 16 单位(约体长 0.22)；前足：四趾无蹼, 长 10 单位
-        (约后足的 0.6 倍)——真实青蛙的比例关系。脚画在身体下缘的高度而不是水面:
-        身体是有厚度的椭球, 放到水面会被透视推到身后, 看起来像掉在水里。
+        只按景深缩放，不参与透视变形——与身体其余部分的多边形画法混在一起也协调。
+        后足：五趾 + 趾间蹼, 长 18 单位；前足：四趾无蹼, 长 11 单位。
+        脚画在身体下缘的高度并压到 BANK 层: 身体盖住脚踝, 只露脚趾。
         """
-        if hind:
-            lx, ly = -12.0 + 2.0 * kick, side * (22.0 + 1.0 * abs(kick))
-            foot_len, toe_frac, bias = FOOT_LEN_HIND, TOE_FRAC_HIND, 0.15
-        else:
-            lx, ly = 16.0, side * 13.0
-            foot_len, toe_frac, bias = FOOT_LEN_FRONT, TOE_FRAC_FRONT, 0.18
-        ex, ey = rot2(lx, ly, self.heading)
-        wx, wy, z = self.pos.x + ex, self.pos.y + ey, self.z + 2.5
-        p0 = cam.project(V3(wx, wy, z))
+        p0 = cam.project(V3(anchor.x, anchor.y, anchor.z))
         if p0 is None:
             return
         sx, sy, depth = p0
-        # 朝向 = 青蛙前进方向(投影到屏幕)：两只脚同一个角度, 不各自外扇
-        fx_, fy_ = math.cos(self.heading), math.sin(self.heading)
-        p1 = cam.project(V3(wx + fx_ * 24.0, wy + fy_ * 24.0, z))
+        p1 = cam.project(V3(anchor.x + math.cos(phi) * 24.0,
+                            anchor.y + math.sin(phi) * 24.0, anchor.z))
         if p1 is None:
             return
         theta = math.degrees(math.atan2(p1[1] - sy, p1[0] - sx)) + 90.0
-        # 精灵整幅对应的世界长度 = 实际脚长 / 趾尖占比 → 屏上大小正好是这只脚的尺寸
+        foot_len, toe_frac = ((FOOT_LEN_HIND, TOE_FRAC_HIND) if hind
+                              else (FOOT_LEN_FRONT, TOE_FRAC_FRONT))
         target = (foot_len / toe_frac) * cam.focal / depth
         if target < 4:
             return
         img = pygame.transform.rotozoom(foot_sprite(144, hind), theta, target / 144.0)
         rect = img.get_rect()
         rect.center = (int(sx), int(sy))            # 图心 = 脚踝, 直接以投影点为中心
-        # 放回身体之下(BANK 层 < MAIN 层): 身体压住脚踝, 只有脚趾露在轮廓外面
-        painter.add(depth - bias, lambda s, img=img, rect=rect: s.blit(img, rect),
-                    Painter.BANK)
+        painter.add(depth - (0.15 if hind else 0.18),
+                    lambda s, img=img, rect=rect: s.blit(img, rect), Painter.BANK)
+
+    def _legs(self, painter, cam, h, z, kick, k_air, wk):
+        """四肢：地面=折叠收拢(大腿肉感贴在体侧, 小腿和脚露在轮廓外),
+        腾空=向后蹬直。画在 BANK 层让身体盖住腿根；关节位置随游动(kick)与相位(wk)微动。
+        """
+        leg_c = mix((98, 162, 70), (58, 104, 44), 0.26)
+        leg_c2 = mix((98, 162, 70), (58, 104, 44), 0.42)
+
+        def W(p, lift):
+            ex, ey = rot2(p[0], p[1], h)
+            return V3(self.pos.x + ex, self.pos.y + ey, z + lift)
+
+        for side in (-1, 1):
+            # ---- 后肢: 髋(体侧内) → 膝(体侧缘) → 踝(轮廓外) → 跗跖 ----
+            # 腿贴着身体半高处(真蛙的大腿和背一样高), 否则斜视角会被高起的身体盖住
+            hip = (-2, side * 11)
+            knee = (15 + 4 * kick - 35 * k_air,
+                    side * (24 + 2 * kick) + wk * 1.5 * side + side * 3 * k_air)
+            ankle = (-10 - 3 * kick - 30 * k_air, side * (35 - 4 * k_air))
+            heel = (-19 - 5 * kick - 33 * k_air, side * (38.5 - 5 * k_air))
+            hw, kw = W(hip, 3.6), W(knee, 4.2)
+            aw, tw = W(ankle, 4.0), W(heel, 3.8)
+            th_ang = math.atan2(kw.y - hw.y, kw.x - hw.x)
+            blob(painter, cam, (hw.x + kw.x) / 2, (hw.y + kw.y) / 2, z + 2.6,
+                 14.0, 8.6, 6.0, leg_c, heading=th_ang, layers=9, taper=0.42,
+                 bias=-0.35, layer=Painter.BANK)
+            limb(painter, cam, kw, aw, 6.2, leg_c, bias=-0.10, layer=Painter.BANK,
+                 taper=0.78)
+            limb(painter, cam, aw, tw, 4.6, leg_c2, bias=0.05, layer=Painter.BANK,
+                 taper=0.82)
+            self._foot(painter, cam, tw,
+                       h + math.pi - side * (0.29 - 0.17 * k_air), hind=True)
+            # ---- 前肢: 肩(体内) → 肘 → 腕(轮廓外), 起跳时前伸准备落地 ----
+            sh = (14, side * 8)
+            el = (18 + 5 * k_air, side * (16 + 1.2 * kick))
+            wr = (19 + 10 * k_air, side * (23 - 2.5 * k_air))
+            shw, elw, wrw = W(sh, 4.0), W(el, 4.2), W(wr, 4.4)
+            limb(painter, cam, shw, elw, 5.2, leg_c, bias=-0.12, layer=Painter.BANK,
+                 taper=0.80)
+            limb(painter, cam, elw, wrw, 4.0, leg_c2, bias=0.06, layer=Painter.BANK,
+                 taper=0.82)
+            self._foot(painter, cam, wrw, h + side * 0.35 - 0.20 * k_air, hind=False)
 
     def draw(self, painter, cam, t, pads):
         x, y = self.pos
@@ -349,38 +390,57 @@ class Frog:
         kick = swing / 9.0                          # -1~1：游动/行走时脚掌向外蹬
         skin = (98, 162, 70)                        # 背部主色
         skin_dark = (58, 104, 44)                   # 阴影/边缘
-        # 不做腿：这个体型的青蛙只保留身体 + 头 + 眼睛, 轮廓最干净(细节越少越不容易出怪)
-        soft_shadow(painter, cam, V3(x + 7, y + 5, gz + 0.18), 38 * s, 30 * s, 0.72, bias=-4)
-        for side in (-1, 1):                    # 后足(五趾蹼足) —— 先画, 根部让身体压住
-            self._foot(painter, cam, side, hind=True, kick=kick)
-        for side in (-1, 1):                    # 前足(四趾, 约后足 0.6 长)
-            self._foot(painter, cam, side, hind=False)
+        # 呼吸(静止时轻轻起伏) + 游动时的身体起伏
+        breathe = 1.0 + (0.02 * math.sin(t * 2.6)
+                         if not airborne and not self._moving else 0.0)
+        bob = abs(math.sin(self.walk_phase)) * 1.6 if (self._moving
+                                                       and not airborne) else 0.0
+        zb = z + bob
+        # 腿部姿态: 地面折叠 ⇄ 腾空后蹬, 按跳跃高度过渡
+        k_air = clamp(z / (self.JUMP_H * 0.8), 0.0, 1.0) if airborne else 0.0
+        wk = math.sin(self.walk_phase) if (self._moving and not airborne) else 0.0
+        soft_shadow(painter, cam, V3(x + 7, y + 5, gz + 0.18), 38 * s, 30 * s, 0.72,
+                    bias=-4, layer=Painter.BANK)   # 影子垫在 BANK 底层, 不压暗腿部颜色
+        self._legs(painter, cam, h, z, kick, k_air, wk)
         # 身体：多层椭球体(有厚度), 再加一层略大的深色轮廓当投影边
-        flat_polygon(painter, cam, self._body_pts(z + 4.0, 1.03), shade(skin_dark, 0.9),
-                     bias=-1.2)
-        blob(painter, cam, x, y, z + 4.2, 36.0, 23.5, 12.5, skin, heading=h,
-             layers=14, taper=0.38, bias=0.3)
+        flat_polygon(painter, cam, self._body_pts(zb + 4.0, 1.03 * breathe),
+                     shade(skin_dark, 0.9), bias=-1.2)
+        blob(painter, cam, x, y, zb + 4.2, 36.0 * breathe, 23.5 * breathe, 11.5, skin,
+             heading=h, layers=14, taper=0.38, bias=0.3)
         for (sx, sy), sr in self.skin_spots:                       # 迷彩斑点
             ex, ey = rot2(sx * 0.92, sy * 0.92, h)
-            flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, z + 8.4, sr, sr * 0.72, h),
-                         mix(skin_dark, skin, 0.30), bias=0.4)
+            flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, zb + 8.4, sr, sr * 0.72, h),
+                         mix(skin_dark, skin, 0.46), bias=0.4)
+        for side in (-1, 1):                                       # 背侧褶: 眼后到后腿的两条浅脊
+            fold = []
+            for i in range(6):
+                f = i / 5
+                ex, ey = rot2(18 - 40 * f, side * (12.5 + 6.5 * math.sin(f * math.pi * 0.9)), h)
+                fold.append(V3(x + ex, y + ey, zb + 11.0))
+            polyline(painter, cam, fold,
+                     add_light(mix(skin, (196, 226, 150), 0.45), 0.05), 2)
         ridge = []                                                 # 背脊高光
         for i in range(7):
             f = i / 6
             rx2, ry2 = rot2(-26 + 50 * f, math.sin(f * math.pi) * 3.0, h)
-            ridge.append(V3(x + rx2, y + ry2, z + 12.6))
+            ridge.append(V3(x + rx2, y + ry2, zb + 12.6))
         polyline(painter, cam, ridge, add_light(skin, 0.26), 2)
         for bx, by, br in ((-10, -9, 7), (6, 8, 8), (-20, 2, 5), (14, -5, 5)):
             ex, ey = rot2(bx, by, h)
-            flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, z + 9.7, br, br * 0.7, h),
-                         mix(skin_dark, skin, 0.22), bias=0.45)
+            flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, zb + 9.7, br, br * 0.7, h),
+                         mix(skin_dark, skin, 0.38), bias=0.45)
         # 头：比身体更宽的椭球, 与身体在肩部自然搭接；前端再收一个短吻
-        blob(painter, cam, self._local(25, 0).x, self._local(25, 0).y, z + 4.4,
-             21.5, 22.5, 11.0, add_light(skin, 0.03), heading=h, layers=11, taper=0.42,
-             bias=0.6)
-        blob(painter, cam, self._local(40, 0).x, self._local(40, 0).y, z + 4.4,
-             14.0, 15.5, 8.5, add_light(skin, 0.05), heading=h, layers=8, taper=0.45,
-             bias=0.7)
+        blob(painter, cam, self._local(25, 0).x, self._local(25, 0).y, zb + 4.4,
+             21.5 * breathe, 22.5 * breathe, 11.0, add_light(skin, 0.03), heading=h,
+             layers=11, taper=0.42, bias=0.6)
+        blob(painter, cam, self._local(40, 0).x, self._local(40, 0).y, zb + 4.4,
+             14.0 * breathe, 15.5 * breathe, 8.5, add_light(skin, 0.05), heading=h,
+             layers=8, taper=0.45, bias=0.7)
+        # 眼罩纹: 从吻端经眼向后的一条深色纵纹(真实蛙的过眼黑纹)
+        for side in (-1, 1):
+            mask = [self._local(46, side * 3.0, 10.9), self._local(39, side * 9.0, 11.6),
+                    self._local(29, side * 14.0, 11.2), self._local(21, side * 16.5, 10.6)]
+            polyline(painter, cam, mask, mix(skin_dark, (34, 56, 34), 0.5), 3)
         mouth = [self._local(38, -14, 10.4), self._local(45, -7.5, 10.7),
                  self._local(47, 0, 10.8), self._local(45, 7.5, 10.7),
                  self._local(38, 14, 10.4)]
@@ -391,12 +451,20 @@ class Frog:
         # 眼睛：头前角的一对鼓包, 鼓包压在眼珠下面(眼珠"长"在头上, 不是浮在头顶)
         for side in (-1, 1):
             bulge = self._local(32, side * 13.0)
-            blob(painter, cam, bulge.x, bulge.y, z + 4.6, 12.5, 11.0, 6.5,
+            blob(painter, cam, bulge.x, bulge.y, zb + 4.6, 12.5, 11.0, 6.5,
                  mix(skin, skin_dark, 0.22), heading=h, layers=7, taper=0.40, bias=0.72)
             eye = self._local(33, side * 13.6, 14.6)
+            if self.blink > 0:                                     # 眨眼: 一层皮色眼皮
+                sphere(painter, cam, self._local(33, side * 13.6, 14.8), 7.4,
+                       mix(skin, skin_dark, 0.18), bias=0.9, sheen=0.25)
+                continue
             sphere(painter, cam, eye, 7.2, (216, 184, 90), bias=0.85, sheen=0.5)
-            pupil = self._local(36.8, side * 13.8, 15.0)
-            sphere(painter, cam, pupil, 2.6, (44, 34, 26), bias=0.95, sheen=0.3)
+            pupil = self._local(36.6, side * 13.8, 15.2)           # 横向椭圆瞳孔
+            flat_polygon(painter, cam,
+                         ellipse_pts(pupil.x, pupil.y, pupil.z, 1.9, 3.3, h),
+                         (36, 28, 22), bias=0.95)
+            glint = self._local(37.6, side * 12.6, 16.3)           # 受光侧的小亮点
+            sphere(painter, cam, glint, 1.1, (246, 246, 230), bias=1.0, sheen=0.0)
         # 舌头（红色圆珠链，每颗独立深度）
         if self.tongue and self.tongue["tip"]:
             tip = self.tongue["tip"]
@@ -1040,6 +1108,7 @@ class Game:
         if self._bank_key != key:
             cache = pygame.Surface((W, H), pygame.SRCALPHA)
             sub = Painter()
+            scenery.draw_beach_base(sub, cam)          # 静态湿沙滩(在堤壁之下先画)
             scenery.draw_bank_base(sub, cam, self.bank_props)
             sub.flush(cache)
             self._bank_key, self._bank_surf = key, cache
