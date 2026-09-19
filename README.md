@@ -7,9 +7,9 @@ one of them is driven by a **spiking neural network** of leaky integrate-and-fir
 assembles, simulates and renders the **real NeuroMechFly** body model — micro-CT meshes,
 126 rotational DoF, compound-eye readout — on MuJoCo.
 
-> 📖 **Full rulebook (Chinese): [docs/RULES.zh-CN.md](docs/RULES.zh-CN.md)** — every
-> behavioural rule and parameter value (food competition, territorial contests, the SNN
-> circuits, the frog, respawns) in one authoritative reference.
+> 📖 **Full rulebook: [docs/RULES.md](docs/RULES.md)** — every behavioural rule and
+> parameter value (food competition, territorial contests, the SNN circuits, the frog,
+> respawns) in one authoritative reference. 中文版：[RULES.zh-CN.md](docs/RULES.zh-CN.md).
 
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![pygame-ce](https://img.shields.io/badge/pygame--ce-2.5-6cbf4a)

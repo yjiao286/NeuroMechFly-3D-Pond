@@ -7,7 +7,7 @@ OpenGL，除源码外不依赖任何美术/音频素材文件。池塘里有 9 �
 126 个转动自由度、复眼读数。
 
 > 📖 **[完整规则手册](docs/RULES.zh-CN.md)** —— 世界、进食竞争、领域对峙、两类果蝇、
-> 青蛙、重生……全部行为规则与参数值的权威参考。
+> 青蛙、重生……全部行为规则与参数值的权威参考。English: [RULES.md](docs/RULES.md).
 
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![pygame-ce](https://img.shields.io/badge/pygame--ce-2.5-6cbf4a)
