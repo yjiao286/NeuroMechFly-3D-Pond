@@ -299,11 +299,13 @@ class ScriptedFly(FlyBase):
         self.displace_t = 0.0          # 被神经元个体逼近时的对峙计时
         self.yielded = 0               # 统计: 让位次数
         self.loiter_t = 0.0            # 满座盘旋等位的计时(超过就放弃)
+        self.flee_speed = 240.0        # 逃离速度(惊慌 240 / 被挤走 150)
 
     def _flee(self, threat_pos, flee_t, panic=True):
         """弃食逃飞: 放弃认领把进食位让出来, 朝远离威胁的方向。"""
         self.state = "逃离"
         self.flee_t = flee_t
+        self.flee_speed = 240.0 if panic else 150.0   # 被挤走不同于吓破胆, 慢一档
         self.groom_t = 0.0                     # 逃跑打断梳洗
         self.eating_now = False
         self.food = None                       # 放弃认领, 把进食位让出来
@@ -330,7 +332,7 @@ class ScriptedFly(FlyBase):
             self.displace_t = 0.0
         if self.state == "逃离":
             self.flee_t -= dt
-            self.move_body(dt, 240, random.uniform(-1, 1) * dt * 2)
+            self.move_body(dt, self.flee_speed, random.uniform(-1, 1) * dt * 2)
             if self.flee_t <= 0 or dfrog > 260:
                 self.state = "觅食"
                 self.food = None
@@ -447,6 +449,10 @@ class BrainFly(FlyBase):
             self.z_target = self.ESCAPE_Z
             self.eating_now = False
             self.groom_t = 0.0                 # 逃逸起飞打断梳洗
+            # 逃逸打断本次歇息: 计时清零, 否则下一轮歇息继承旧账,
+            # 刚落地就被"歇满 9 秒"条款赶走, 形成落地-起飞循环
+            self.rest_t = 0.0
+            self.rest_total = 0.0
             self.move_body(dt, self.BASE_SPEED * cmd["thrust"], random.uniform(-1, 1) * dt)
         elif self.brain.resting:
             # 歇息回路开了就落地——目标被占也照落: 走近对峙, 脚本个体会让位
@@ -869,7 +875,7 @@ class Game:
                     pygame.draw.rect(surf, color, (panel.x + 70, yy, max(2, int(150 * act)), 12),
                                      border_radius=3)
                 notes = [
-                    "GF 巨纤维·逃逸: 蛙近175触发",
+                    "GF 巨纤维·逃逸: 初遇170/习惯化70",
                     "CX 中央复合体·巡航: 左右竞争",
                     "REST 歇息: 悬停食饵→降落进食",
                     "超阈值(-52mV)发放; 条=距发放",
