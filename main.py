@@ -323,9 +323,9 @@ class ScriptedFly(FlyBase):
         dfrog = self.pos.distance_to(frog.pos)
         if self.state != "逃离" and dfrog < 110:
             self._flee(frog.pos, 1.1)
-        # 领域对峙: 被 Game._update_contests 标记为"正被神经元个体压制"满 0.5s
-        # 就弃食让座(动作层的伏低/颤抖/冲撞由 contest_t 驱动, 见 models.draw_fly)
-        if self.state == "进食" and self.contest_t > 0.5:
+        # 领域对峙: 被 Game._update_contests 标记为"正被神经元个体压制"满 1.8s
+        # (足够挨上两记大冲撞)就弃食让座; 伏低/颤抖/退让由 contest_t 驱动(models)
+        if self.state == "进食" and self.contest_t > 1.8:
             self.yielded += 1
             foe = self.contest_foe if self.contest_foe is not None else frog
             self._flee(foe.pos, 0.8, panic=False)
@@ -351,9 +351,12 @@ class ScriptedFly(FlyBase):
                 self.food.seated.add(id(self))
             else:
                 self.food.seated.discard(id(self))
-            if self.contest_t > 0.3:
-                # 被顶得节节后退(背离攻击者方向), 退无可退就让位起飞
-                self.pos += self.contest_dir * 40.0 * dt
+            if self.contest_t > 0.7:
+                # 被顶得节节后退(背离攻击者方向), 但最多退到食饵边 16px——
+                # 抱着自己的饭碗退, 不被赶下荷叶; 退无可退就只能让位起飞
+                back = self.pos + self.contest_dir * 55.0 * dt
+                if self.food is None or back.distance_to(self.food.pos()) < 16.0:
+                    self.pos.update(back)
             if self.eating_now and self.food and self.food.amount > 0:
                 self.food.bite(dt)
             if self.eat_t <= 0 or not self.food or self.food.amount <= 0:
@@ -488,12 +491,18 @@ class BrainFly(FlyBase):
             self._update_groom(dt)
             self.eating_now = False
             if self.contest_t > 0.0 and self.contest_foe is not None:
-                # 对峙中: 转身面向对手摆好架势, 暂停爬行/进食——
+                # 对峙中: 面向对手; 不在同一块食饵上/还离得远时先快步逼近,
+                # 贴近(26px)才站定输出——隔着半片荷叶挥拳只像抽风。
                 # 周期性的冲撞猛探由姿态层(models.draw_fly)按 contest_t 叠加
                 ang = math.atan2(self.contest_foe.pos.y - self.pos.y,
                                  self.contest_foe.pos.x - self.pos.x)
                 self.heading = lerp_angle(self.heading, ang, 1 - math.exp(-8 * dt))
-                self.move_body(dt, 0, 0)
+                dfoe = self.contest_foe.pos.distance_to(self.pos)
+                if dfoe > 26:
+                    self.move_body(dt, min(60.0, dfoe * 2.0 + 18.0), 0)
+                else:
+                    self.move_body(dt, 0, 0)
+                self.rest_t = 0.0            # 对峙期间不算"没进展", 别被超时赶走
             elif food and food.amount > 0:
                 # 落上叶面就走过去(可能要穿过小半个荷叶), 贴近后进入死区防头尾翻转
                 if food_dist > 8:

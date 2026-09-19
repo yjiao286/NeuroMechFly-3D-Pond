@@ -40,8 +40,8 @@ def main():
         f.pos.update(V2(4000, 4000))
     bf = g.brain_fly()
     victim = next(f for f in g.flies if isinstance(f, M.ScriptedFly))
-    # 攻击方: 落定在食饵0旁
-    bf.pos.update(c0.pos() + V2(6, 6))
+    # 攻击方: 落定在自己那块(食饵0)的远端, 要先逼近 40px 才进入贴脸对峙
+    bf.pos.update(c0.pos() + V2(-10, -8))
     bf.z = bf.z_target = M.FlyBase.LAND_Z
     bf.brain.resting = True
     bf.food = c0
@@ -56,14 +56,14 @@ def main():
 
     center = V3((c0.pos().x + c1.pos().x) / 2, (c0.pos().y + c1.pos().y) / 2, 4)
     tiles = []
-    for i in range(int(0.7 / DT)):
+    for i in range(int(2.4 / DT)):
         g.t += DT
         g.simulate(DT, V2(0), False, False)
         ct = victim.contest_t
-        if i in (4, 14, 24, 34):            # ~0.07/0.23/0.40/0.57s
-            grab(g, center, f"t={i*DT:.2f}s ct={ct:.2f} lunge相位", tiles)
-    montage([t for t, _ in tiles], 4, (400, 300), [l for _, l in tiles],
-            "/tmp/pond-views/contest.png", "TERRITORIAL CONTEST (attacker left/gold)")
+        if i in (15, 45, 75, 105, 135):      # ~0.25/0.75/1.25/1.75/2.25s
+            grab(g, center, f"t={i*DT:.2f}s ct={ct:.2f}", tiles)
+    montage([t for t, _ in tiles], 5, (400, 300), [l for _, l in tiles],
+            "/tmp/pond-views/contest.png", "CONTEST: approach -> lunge -> yield")
     pygame.quit()
 
 
