@@ -526,6 +526,10 @@ class FoodCrumb:
         self.feeders = 0               # 正在这块碎屑上进食的果蝇数
         # 在途认领者名单, 每帧由 Game.simulate 重建: [(距离, 果蝇id, 是否进食)]
         self.waiters = []
+        # 在座进食者登记: 帧首按 eating_now 重建, 帧内由开吃闸门实时增删——
+        # feeders 统计是帧首快照, 同帧先后落地的两只会都看到"0人占座",
+        # 只有这个集合能在同一帧内仲裁出唯一入座者
+        self.seated = set()
         self.side = side               # 同片荷叶上的第几块(0/1): 重生在对侧半边
         self.seed_off = random.uniform(0, 6.28)
         self.respawn()
