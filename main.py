@@ -299,6 +299,7 @@ class ScriptedFly(FlyBase):
         self.displace_t = 0.0          # 被神经元个体逼近时的对峙计时
         self.yielded = 0               # 统计: 让位次数
         self.loiter_t = 0.0            # 满座盘旋等位的计时(超过就放弃)
+        self._approach_t = 0.0         # 近场进近滞留计时(兜底防追踪极限环)
         self.flee_speed = 240.0        # 逃离速度(惊慌 240 / 被挤走 150)
 
     def _flee(self, threat_pos, flee_t, panic=True):
@@ -364,11 +365,11 @@ class ScriptedFly(FlyBase):
             if self.food:
                 fp = self.food.pos()
                 d = fp.distance_to(self.pos)
-                self.heading += clamp(ang_diff(self.heading, math.atan2(fp.y - self.pos.y,
-                                                                        fp.x - self.pos.x)), -1, 1) * 2.6 * dt
+                ang = math.atan2(fp.y - self.pos.y, fp.x - self.pos.x)
                 if self.food.full(self):
-                    # 让座/等位: 大圈缓飞(半径~20px, 比贴着食饵打转从容),
-                    # 0.45s 一次重新权衡, 通常很快分到别的座位或轮到自己
+                    # 让座/等位: 大圈缓飞, 0.45s 一次重新权衡,
+                    # 通常很快分到别的座位或轮到自己
+                    self.heading += clamp(ang_diff(self.heading, ang), -1, 1) * 2.6 * dt
                     if self.food.amount < 0.8 or self.loiter_t > 3.5:
                         self.food = None
                         self.loiter_t = 0.0
@@ -380,7 +381,27 @@ class ScriptedFly(FlyBase):
                             self.heading += 0.3 * self.buzz_jitter * dt
                 else:
                     self.loiter_t = 0.0
-                    self.move_body(dt, self.BASE_SPEED * self.buzz_jitter, 0)
+                    if d < 45:
+                        # 末端进近: 强对准 + 随距离减速。纯追踪(转弯≤2.6rad/s、
+                        # 巡航110px/s)的最小转弯半径≈42px, 远大于落地判定9px——
+                        # 侧向偏差进场(被青蛙惊飞后随机朝向再选食, 实战是常态)
+                        # 会收敛成42px的追踪极限环, 永远差一步落不下去。
+                        # 指数对准(增益7rad/s)超过任何距离上的视线旋转率v/d,
+                        # 极限环在数学上不再存在; 末端减速让落点又慢又准
+                        self.heading = lerp_angle(self.heading, ang,
+                                                  1 - math.exp(-7.0 * dt))
+                        speed = clamp(d * 2.2 + 14.0, 18.0,
+                                      self.BASE_SPEED * self.buzz_jitter)
+                    else:
+                        self.heading += clamp(ang_diff(self.heading, ang), -1, 1) * 2.6 * dt
+                        speed = self.BASE_SPEED * self.buzz_jitter
+                    # 兜底: 近场滞留太久(目标重生挪位等罕见情形)就放弃重来
+                    self._approach_t = self._approach_t + dt if d < 70 else 0.0
+                    if self._approach_t > 6.0:
+                        self.food = None
+                        self._approach_t = 0.0
+                        self._food_cd = 1.2
+                    self.move_body(dt, speed, 0)
                     if d < 9:
                         self.state = "进食"
                         self.eat_t = random.uniform(2.2, 3.2)
@@ -489,9 +510,12 @@ class BrainFly(FlyBase):
             braking = 1.0
             if food and self.brain.escape_timer <= 0:
                 braking = 0.45 if food_dist < 45 else 1.0   # 接近食饵减速, 让歇息电位积累
+                # 近场提高对准增益: 巡航速度下原增益(≤1.6rad/s)的转弯半径≈28px,
+                # 大于歇息发放所需的~24px 感应半径——侧偏进场同样会绕圈充不了电
+                gain = 1.6 * (1.0 if food_dist >= 50 else 2.2)
                 k = clamp(ang_diff(self.heading,
                                    math.atan2(food.pos().y - self.pos.y, food.pos().x - self.pos.x)), -1, 1)
-                self.heading += k * 1.6 * dt * (0.5 + self.hunger)    # 气味趋向
+                self.heading += k * gain * dt * (0.5 + self.hunger)    # 气味趋向
             self.move_body(dt, self.BASE_SPEED * cmd["thrust"] * self.buzz_jitter * braking, cmd["turn"])
         self.hunger = min(1.0, self.hunger + dt * 0.05)   # 饿得快: 觅食驱力强, 存在感足
 
