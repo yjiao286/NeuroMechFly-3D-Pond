@@ -197,9 +197,11 @@ on opposite sides:
   thrusts both front legs over the opponent's head — the signature move of real
   Drosophila aggression) with **wing-threat** half-spreads, while the feeding
   scripted fly crouches, trembles, clings to its meal and backs away until it
-  yields after ~1.8 s (two lunges). Measured, it alone takes ~35% of all pond
-  feeding time (the 9-fly average is 11%) — the gold frame is not just a label,
-  the competitive edge is visible;
+  yields after ~1.8 s (two lunges) — and the attacker deliberately targets the
+  opponent's bowl when it is closer, eating the spoils the moment it wins.
+  Measured: 5-12 evictions per 4 minutes, and 26-32 meals of its own (no fewer
+  than any single scripted fly). Its edge is not eating more — it is winning
+  fights and daring to feed in plain sight once habituated to the still frog;
 - fleeing releases the claim so the seat frees up immediately; the neural fly leaves when
   satiated (hunger < 0.05) instead of eating a crumb down to nothing.
 
