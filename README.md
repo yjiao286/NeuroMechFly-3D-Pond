@@ -184,9 +184,10 @@ on opposite sides:
 - a fly en route **reserves its seat** by "closest claimant wins": seats are counted
   from its own distance outwards, only claimants strictly closer count against it —
   two equidistant waiters can never each see the other as blocking (at capacity 1
-  this used to deadlock: both saw "full", neither dared to land). The start-eating
-  gate is sticky (whoever is eating keeps the seat, a newcomer requires an empty
-  one), which closes the same-frame landing race;
+  this used to deadlock: both saw "full", neither dared to land). Eating itself is
+  arbitrated by a per-crumb **seated registry** (rebuilt at frame start, mutated
+  live within the frame), so even two flies landing in the same frame cannot both
+  take the single seat;
 - when the target is full a fly **loiters on a wide, slow circle** (turn rate varies per
   individual so the circles don't overlap); a crumb nearly eaten bare (< 0.8 left) or a
   3.5 s wait means moving on — waiting stays a brief contested moment, never an orbit;
