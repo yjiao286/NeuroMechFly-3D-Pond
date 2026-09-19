@@ -524,25 +524,29 @@ class FoodCrumb:
         self.offset = pygame.math.Vector2(0, 0)
         self.claims = 0                # 已认领(把它当目标)的果蝇数
         self.feeders = 0               # 正在这块碎屑上进食的果蝇数
-        self.inbound = set()           # 已认领且正在飞过来的果蝇 id(预约座位)
+        # 在途认领者名单, 每帧由 Game.simulate 重建: [(距离, 果蝇id, 是否进食)]
+        self.waiters = []
         self.side = side               # 同片荷叶上的第几块(0/1): 重生在对侧半边
         self.seed_off = random.uniform(0, 6.28)
         self.respawn()
 
-    def free_slots(self, for_fly=None):
-        """还能再接纳几只 = 容量 − 正在进食 − 在途预约。
+    def seats_for(self, dist):
+        """从 dist 处看这块碎屑还剩几个空位 = 容量 − 正在进食 − 比我更近的在途者。
 
-        两个坑都踩过:
-          · 只按"认领数"判满 → 两只互相认领就都以为没位置, 全在天上排队(95% 时间没人吃);
+        规则是"最近者得座": 只统计严格比我更近的认领者, 距离并列表外者按先到
+        先得(同一帧里谁都看谁不顺眼的情况由进食闸门的粘性兜底)。
+        曾经的两个坑:
+          · 只按"认领数"判满 → 两只互相认领就都以为没位置, 全在天上排队
+            (容量=1 时只要两只同时等位就互相锁死, 谁也不落);
           · 只按"正在进食"判满 → 同时到达的两只会一起落下去, 超出容量。
-        现在按"进食 + 在途预约"算, 并且**排除自己**(否则自己占着自己的位, 永远不敢落)。
+        "最近者得座"对任意容量都给出唯一的落座者, 两类问题都不存在。
         """
-        inbound = len(self.inbound - {id(for_fly)}) if for_fly is not None \
-            else len(self.inbound)
-        return max(0, self.CAPACITY - self.feeders - inbound)
+        closer = sum(1 for (d, _fid, eating) in self.waiters if not eating and d < dist)
+        return max(0, self.CAPACITY - self.feeders - closer)
 
     def full(self, for_fly=None):
-        return self.free_slots(for_fly) <= 0
+        dist = for_fly.pos.distance_to(self.pos()) if for_fly is not None else 0.0
+        return self.seats_for(dist) <= 0
 
     def respawn(self):
         self.amount = 6.0

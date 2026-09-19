@@ -71,7 +71,7 @@ def rot2(vx, vy, heading):
 
 
 def pick_food(pos, crumbs, bias=1.0):
-    """抢食规则：代价 = 距离 ÷ 空进食位 × 个体偏好。
+    """抢食规则：代价 = 距离 ÷ 空位(按"最近者得座"从我这里数) × 个体偏好。
 
     空位多的食饵更划算 → 果蝇自然分散到不同荷叶; 余量新鲜的碎屑值得多飞一段路
     (快见底的只顺路吃); bias 是每只果蝇固定的偏好系数(0.8~1.2), 让同时选食的
@@ -83,7 +83,7 @@ def pick_food(pos, crumbs, bias=1.0):
         if c.amount <= 0.3:
             continue
         d = c.pos().distance_to(pos)
-        free = c.free_slots()
+        free = c.seats_for(d)
         if free <= 0:
             if d < fb_d:
                 fallback, fb_d = c, d
@@ -367,18 +367,17 @@ class ScriptedFly(FlyBase):
                 self.heading += clamp(ang_diff(self.heading, math.atan2(fp.y - self.pos.y,
                                                                         fp.x - self.pos.x)), -1, 1) * 2.6 * dt
                 if self.food.full(self):
-                    # 满座: 不硬挤, 大圈缓飞等位(转弯率随个体微差, 圈不重叠);
-                    # 碎屑快见底、或等超过 3.5 秒就放弃——游荡片刻再选,
-                    # 免得所有等位者一窝蜂挤向同一个刚空出的座位
+                    # 让座/等位: 大圈缓飞(半径~20px, 比贴着食饵打转从容),
+                    # 0.45s 一次重新权衡, 通常很快分到别的座位或轮到自己
                     if self.food.amount < 0.8 or self.loiter_t > 3.5:
                         self.food = None
                         self.loiter_t = 0.0
                         self._food_cd = 0.8
                     else:
                         self.loiter_t += dt
-                        self.move_body(dt, self.BASE_SPEED * 0.45, 0)
+                        self.move_body(dt, self.BASE_SPEED * 0.55, 0)
                         if d < 40:
-                            self.heading += 1.0 * self.buzz_jitter * dt
+                            self.heading += 0.3 * self.buzz_jitter * dt
                 else:
                     self.loiter_t = 0.0
                     self.move_body(dt, self.BASE_SPEED * self.buzz_jitter, 0)
@@ -594,9 +593,9 @@ class Game:
         for c in self.crumbs:                       # 抢食统计: 认领数 / 正在进食数
             c.claims = sum(1 for f in self.flies if f.food is c)
             c.feeders = sum(1 for f in self.flies if f.food is c and f.eating_now)
-            c.inbound = {id(f) for f in self.flies   # 只统计"马上就到"的(36px): 远处过路的
-                         if f.food is c and not f.eating_now  # 不占座, 免得假性满座
-                         and f.pos.distance_to(c.pos()) < 36}
+            # 在途认领者名单(带距离): "最近者得座"——比我近的才占我的座
+            c.waiters = sorted((f.pos.distance_to(c.pos()), id(f), f.eating_now)
+                               for f in self.flies if f.food is c and not f.eating_now)
         landed = self.frog.update(dt, move, jump, tongue_cmd, self.aim_target,
                                   self.ripples, self.sounds)
         if landed:
