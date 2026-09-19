@@ -6,6 +6,9 @@ OpenGL，除源码外不依赖任何美术/音频素材文件。池塘里有 9 �
 同一仓库还通过 MuJoCo 组装、仿真并渲染**真实的 NeuroMechFly** 身体模型——micro-CT 网格、
 126 个转动自由度、复眼读数。
 
+> 📖 **[完整规则手册](docs/RULES.zh-CN.md)** —— 世界、进食竞争、领域对峙、两类果蝇、
+> 青蛙、重生……全部行为规则与参数值的权威参考。
+
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![pygame-ce](https://img.shields.io/badge/pygame--ce-2.5-6cbf4a)
 ![renderer](https://img.shields.io/badge/3D%20renderer-software%20rasteriser-2f6f5f)
