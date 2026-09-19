@@ -190,10 +190,14 @@ on opposite sides:
 - when the target is full a fly **loiters on a wide, slow circle** (turn rate varies per
   individual so the circles don't overlap); a crumb nearly eaten bare (< 0.8 left) or a
   3.5 s wait means moving on — waiting stays a brief contested moment, never an orbit;
-- **the neural fly is territorial**: once it lands on a pad, scripted flies feeding on that
-  pad abandon their crumbs within half a second (real Drosophila attack-and-displace at
-  food patches). Measured, it alone takes ~35% of all pond feeding time (the 9-fly average
-  is 11%) — the gold frame is not just a label, the competitive edge is visible;
+- **the neural fly is territorial**: the pad it lands on is its territory, and the
+  contest is fully choreographed — it turns to face the occupant and repeatedly
+  **lunges** (rears up, thrusts its front legs at the opponent — the signature move
+  of real Drosophila aggression) with quick **wing-threat** flicks, while the
+  feeding scripted fly crouches, trembles, backs away and abandons its crumb
+  within half a second. Measured, it alone takes ~35% of all pond feeding time
+  (the 9-fly average is 11%) — the gold frame is not just a label, the
+  competitive edge is visible;
 - fleeing releases the claim so the seat frees up immediately; the neural fly leaves when
   satiated (hunger < 0.05) instead of eating a crumb down to nothing.
 
