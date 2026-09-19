@@ -341,11 +341,16 @@ class ScriptedFly(FlyBase):
             self.z_target = self.LAND_Z
             self.move_body(dt, 0, 0)               # 高度过渡就写在 move_body 里: 落地必须调它
             self._update_groom(dt)
-            # 落地了才动嘴(下降过程不啃), 擦眼睛时前足也腾不出空;
-            # 开吃闸门带粘性: 已在吃的保持(feeders 里含自己), 没吃则要求餐位空着,
-            # 否则同帧到达的两只会一起落下去(容量=1 时的竞态)
+            # 落地了才动嘴(下降过程不啃), 擦眼睛时前足也腾不出空。
+            # 在座登记仲裁: 我已在座(粘性)或座位全空才开吃——feeders 统计是
+            # 帧首快照, 堵不住同一帧内先后落地的竞态, seated 集合帧内实时增删
+            seat_ok = id(self) in self.food.seated or not self.food.seated
             self.eating_now = (self.groom_t <= 0 and self.z < self.LAND_Z + 3.5
-                               and (self.eating_now or self.food.feeders == 0))
+                               and seat_ok)
+            if self.eating_now:
+                self.food.seated.add(id(self))
+            else:
+                self.food.seated.discard(id(self))
             if self.contest_t > 0.3:
                 # 被顶得节节后退(背离攻击者方向), 退无可退就让位起飞
                 self.pos += self.contest_dir * 40.0 * dt
@@ -464,7 +469,6 @@ class BrainFly(FlyBase):
         if cmd["gf_fired"]:
             away = self.pos - frog.pos
             self.heading = math.atan2(away.y, away.x) + random.uniform(-0.3, 0.3)
-        was_eating = self.eating_now
 
         if self.brain.escape_timer > 0:
             self.z_target = self.ESCAPE_Z
@@ -499,15 +503,20 @@ class BrainFly(FlyBase):
                 else:
                     crawl = 0.0
                 self.move_body(dt, crawl if self.groom_t <= 0 else 0.0, 0)
+                # 开吃闸门: 落地才吃; 在座登记仲裁(同帧竞态, 见 ScriptedFly 同款注释)
+                seat_ok = id(self) in food.seated or not food.seated
                 if (food_dist < 10 and food.amount > 0 and self.groom_t <= 0
-                        and self.z < self.LAND_Z + 3.5
-                        and (was_eating or food.feeders == 0)):   # 落地才吃; 闸门带粘性
+                        and self.z < self.LAND_Z + 3.5 and seat_ok):
                     self.eating_now = True
+                    food.seated.add(id(self))
                     food.bite(dt)
                     self.hunger = max(0.0, self.hunger - dt * 0.22)
                     self.rest_t = 0.0
                     if food.amount <= 0 or self.hunger <= 0.05:
                         self._takeoff()          # 吃光了, 或者吃饱了——把座位让出来
+                else:
+                    food.seated.discard(id(self))
+                    self.eating_now = False
             else:
                 self.move_body(dt, 0, 0)
             # 主动起飞：3.5 秒没吃到东西(含对峙失败)，或这顿歇满 9 秒
@@ -625,6 +634,8 @@ class Game:
         for c in self.crumbs:                       # 抢食统计: 认领数 / 正在进食数
             c.claims = sum(1 for f in self.flies if f.food is c)
             c.feeders = sum(1 for f in self.flies if f.food is c and f.eating_now)
+            # 在座登记按上帧的进食状态重建; 帧内由开吃闸门实时增删(同帧仲裁)
+            c.seated = {id(f) for f in self.flies if f.food is c and f.eating_now}
             # 在途认领者名单(带距离): "最近者得座"——比我近的才占我的座
             c.waiters = sorted((f.pos.distance_to(c.pos()), id(f), f.eating_now)
                                for f in self.flies if f.food is c and not f.eating_now)
@@ -679,7 +690,9 @@ class Game:
         劣势方伏低退让直至弃食逃走——这里把它做成看得见的戏。
         """
         bf = self.brain_fly()
-        old_foe = {id(f): f.contest_foe for f in self.flies}
+        # 先快照上一帧的 (对手, 对峙时长) 再重置——只存对手不存时长的话,
+        # 时长会被下面的重置清零, 每帧都当成新配对, 对峙永远只有一帧
+        prev = {id(f): (f.contest_foe, f.contest_t) for f in self.flies}
         if bf is not None:
             bf.contest_t, bf.contest_foe, bf.contest_role = 0.0, None, ""
         for f in self.flies:
@@ -697,14 +710,16 @@ class Game:
                 continue
             away = f.pos - bf.pos
             n = away.length() or 1.0
-            f.contest_t = f.contest_t + dt if old_foe.get(id(f)) is bf else dt
+            foe0, t0 = prev.get(id(f), (None, 0.0))
+            f.contest_t = t0 + dt if foe0 is bf else dt
             f.contest_foe = bf
             f.contest_dir = V2(away.x / n, away.y / n)      # 被压方: 背离攻击者的方向
             f.contest_role = "victim"
             if d < nearest_d:
                 nearest, nearest_d = f, d
         if nearest is not None:
-            bf.contest_t = bf.contest_t + dt if old_foe.get(id(bf)) is nearest else dt
+            foe0, t0 = prev.get(id(bf), (None, 0.0))
+            bf.contest_t = t0 + dt if foe0 is nearest else dt
             bf.contest_foe = nearest
             bf.contest_dir = V2(-nearest.contest_dir.x, -nearest.contest_dir.y)
             bf.contest_role = "attacker"
