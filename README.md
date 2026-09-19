@@ -181,11 +181,12 @@ on opposite sides:
 - pick cost = `distance ÷ free slots × individual bias (0.8–1.2)`, and fresher crumbs are
   worth a longer flight — so flies spread out over pads instead of herd-rushing the single
   free seat;
-- a fly en route **reserves its seat** (`inbound`, counted only within 36 units — imminent
-  arrivals); the occupancy test excludes the asker itself, otherwise a fly blocks its own
-  seat and nobody ever dares to land (a deadlock this actually hit: no fly ate 95% of the
-  time); the start-eating gate is sticky (whoever is eating keeps the seat, a newcomer
-  requires an empty one), which closes the same-frame landing race;
+- a fly en route **reserves its seat** by "closest claimant wins": seats are counted
+  from its own distance outwards, only claimants strictly closer count against it —
+  two equidistant waiters can never each see the other as blocking (at capacity 1
+  this used to deadlock: both saw "full", neither dared to land). The start-eating
+  gate is sticky (whoever is eating keeps the seat, a newcomer requires an empty
+  one), which closes the same-frame landing race;
 - when the target is full a fly **loiters on a wide, slow circle** (turn rate varies per
   individual so the circles don't overlap); a crumb nearly eaten bare (< 0.8 left) or a
   3.5 s wait means moving on — waiting stays a brief contested moment, never an orbit;
@@ -197,8 +198,8 @@ on opposite sides:
   satiated (hunger < 0.05) instead of eating a crumb down to nothing.
 
 Measured over four minutes (frog stationary): exactly one feeder per crumb (0.0%
-overshoot); loiter median under 1 s, longest ~2 s; no "circling but never eating"
-stretch past 8 s.
+overshoot); loiter median 0.5 s, longest ~4 s (seat-change transitions, not stuck
+waits); no "circling but never eating" stretch past 8 s.
 
 Pose and gait logic covers four fly states — flight (22 Hz beat with the wing tips arcing up and
 down while the wings sweep fore/aft, legs trailing back), walking (tripod gait with a real swing
