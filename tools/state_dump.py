@@ -25,7 +25,7 @@ def run(seconds=60.0):
             print(f"--- t={fr*dt:4.0f}s")
             for c in g.crumbs:
                 print(f"  食饵#{crumbs[id(c)]} amount={c.amount:4.1f} "
-                      f"feeders={c.feeders} inbound={len(c.inbound)} claims={c.claims}")
+                      f"feeders={c.feeders} waiters={len(c.waiters)} claims={c.claims}")
             for f in g.flies:
                 tgt = crumbs.get(id(f.food), "-") if f.food is not None else "-"
                 d = f"{f.pos.distance_to(f.food.pos()):4.0f}" if f.food else "  -"
