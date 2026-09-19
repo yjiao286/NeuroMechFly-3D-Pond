@@ -122,6 +122,7 @@ class Camera3D:
         self.target = V3(target)
         self.focal = focal
         self.cx, self.cy = cx, cy
+        self.w, self.h = W, H
         self._calc()
 
     def _calc(self):
@@ -163,6 +164,46 @@ class Camera3D:
         return self.focal * r / depth
 
 
+class SubCamera:
+    """把主相机的成像平面平移/放大后的"子相机"。
+
+    生物在自己的离屏画布里绘制时用它：屏幕坐标 = (主相机屏幕坐标 - 画布原点) × ss。
+    因此焦距与主点按同样规则变换, 其余几何量(位置/朝向)与主相机完全一致——
+    渲染图元拿到子相机就照常工作, 不需要任何特判。
+    """
+
+    def __init__(self, cam, ox, oy, ss):
+        self.pos, self.target = cam.pos, cam.target
+        self.fwd, self.right, self.up = cam.fwd, cam.right, cam.up
+        self.NEAR = cam.NEAR
+        self.ss = ss
+        self.focal = cam.focal * ss
+        self.cx = (cam.cx - ox) * ss
+        self.cy = (cam.cy - oy) * ss
+        self.w, self.h = cam.w, cam.h
+
+    def project(self, p):
+        d = p - self.pos
+        depth = d.dot(self.fwd)
+        if depth < self.NEAR:
+            return None
+        return (self.cx + self.focal * d.dot(self.right) / depth,
+                self.cy - self.focal * d.dot(self.up) / depth,
+                depth)
+
+    def view(self, p):
+        """世界坐标 → 视空间(子相机只是平移放大像平面, 视空间与主相机一致)。"""
+        d = p - self.pos
+        return (d.dot(self.right), d.dot(self.up), d.dot(self.fwd))
+
+    def project_v(self, v):
+        vx, vy, vz = v
+        return (self.cx + self.focal * vx / vz, self.cy - self.focal * vy / vz, vz)
+
+    def screen_radius(self, r, depth):
+        return self.focal * r / depth
+
+
 class Painter:
     """多层画家算法: 按 layer 从小到大分批绘制, 层内按深度远→近。
     层号约定: 0=水面 1=水波/焦散/涟漪 2=荷叶/食饵 3=岸上立体物 4=生物。
@@ -183,7 +224,93 @@ class Painter:
                 fn(surf)
             self.layers[k].clear()
 
+    def creature(self, cam, center, radius, layer=MAIN, bias=0.0, ss=3,
+                 pad=1.22, opacity=255):
+        """把一只生物画进独立的超采样画布, 再整体抗锯齿贴回场景。
 
+        好处有三：轮廓不再是硬多边形锯齿；同一生物内部由子 painter 稳定排序,
+        不会与自身抖动；对外只占一个绘制项, 场景排序更省。
+        用法：
+            with painter.creature(cam, pos, 40) as (sub, scam):
+                blob(sub, scam, ...)
+        """
+        return _CreatureScope(self, cam, center, radius, layer, bias, ss, pad, opacity)
+
+
+class _CreatureScope:
+    def __init__(self, painter, cam, center, radius, layer, bias, ss, pad, opacity):
+        self.painter, self.cam, self.center = painter, cam, center
+        self.radius, self.layer, self.bias = radius, layer, bias
+        self.ss, self.pad, self.opacity = ss, pad, opacity
+        self.active = False
+
+    def __enter__(self):
+        cam = self.cam
+        p = cam.project(self.center)
+        if p is None:                                   # 整体在近平面之后
+            return _Discard(), _NullCamera()
+        sx, sy, depth = p
+        r = cam.screen_radius(self.radius * self.pad, depth)
+        if r < 1.0:
+            return _Discard(), _NullCamera()
+        x0 = int(sx - r)
+        y0 = int(sy - r)
+        x1 = int(sx + r) + 1
+        y1 = int(sy + r) + 1
+        # 裁到屏幕内(生物在画面边缘时只画露出的一半, 省填充)
+        cx0, cy0 = max(0, x0), max(0, y0)
+        cx1, cy1 = min(cam.w, x1), min(cam.h, y1)
+        if cx1 - cx0 < 2 or cy1 - cy0 < 2:
+            return _Discard(), _NullCamera()
+        self.box = (cx0, cy0, cx1, cy1)
+        self.ss_surf = pygame.Surface(((cx1 - cx0) * self.ss, (cy1 - cy0) * self.ss),
+                                      pygame.SRCALPHA)
+        self.sub = Painter()
+        self.scam = SubCamera(cam, cx0, cy0, self.ss)
+        self.depth = depth
+        self.active = True
+        return self.sub, self.scam
+
+    def __exit__(self, *exc):
+        if not self.active:
+            return False
+        self.sub.flush(self.ss_surf)
+        x0, y0, x1, y1 = self.box
+        img = pygame.transform.smoothscale(self.ss_surf, (x1 - x0, y1 - y0))
+        if self.opacity < 255:
+            img.set_alpha(self.opacity)
+        depth = self.depth - self.bias
+        self.painter.add(depth, lambda s, img=img, x0=x0, y0=y0: s.blit(img, (x0, y0)),
+                         self.layer)
+        return False
+
+
+class _Discard:
+    """生物完全在画面外时的空 painter: 绘制调用被安静丢弃。"""
+
+    WATER, FX, PAD, BANK, MAIN = 0, 1, 2, 3, 4
+
+    def add(self, *a, **k):
+        pass
+
+
+class _NullCamera:
+    """空相机: 所有图元都会因"在近平面之外"而直接返回, 不产生任何绘制。"""
+
+    focal, cx, cy = 1.0, 0.0, 0.0
+    NEAR, w, h = 1.0, 0, 0
+
+    def project(self, p):
+        return None
+
+    def view(self, p):
+        return (0.0, 0.0, -1.0)
+
+    def project_v(self, v):
+        return (0.0, 0.0, 0.0)
+
+    def screen_radius(self, r, depth):
+        return 0.0
 def clip_near(pts, near):
     """Sutherland–Hodgman: 对近平面(vz >= near)裁剪视空间点列 (vx, vy, vz)。"""
     out = []
@@ -201,8 +328,13 @@ def clip_near(pts, near):
     return out
 
 
-def flat_polygon(painter, cam, pts3, color, outline=None, owidth=2, bias=0.0, layer=4):
-    """水平多边形（世界坐标点列），近平面裁剪后按平均深度排序。"""
+def flat_polygon(painter, cam, pts3, color, outline=None, owidth=2, bias=0.0, layer=4,
+                 aa=False):
+    """水平多边形（世界坐标点列），近平面裁剪后按平均深度排序。
+
+    aa=True 时额外用抗锯齿线沿同一条边描一圈同色——填色本身是硬边的,
+    这一圈会把边界像素混合掉, 荷叶/叶缘这类大块轮廓就不再是锯齿状。
+    """
     vs = [cam.view(p) for p in pts3]
     vs = clip_near(vs, cam.NEAR)
     if len(vs) < 3:
@@ -211,8 +343,10 @@ def flat_polygon(painter, cam, pts3, color, outline=None, owidth=2, bias=0.0, la
              for vx, vy, vz in vs]
     depth = sum(vz for _, _, vz in vs) / len(vs)
 
-    def draw(s, pts=pts2d, c=color, o=outline, w=owidth):
+    def draw(s, pts=pts2d, c=color, o=outline, w=owidth, aa=aa):
         pygame.draw.polygon(s, c, pts)
+        if aa and len(pts) > 2:
+            pygame.draw.aalines(s, c, True, pts)
         if o:
             pygame.draw.polygon(s, o, pts, w)
 
@@ -254,8 +388,53 @@ def sphere(painter, cam, pos, r, color, bias=0.0, layer=4, sheen=1.0):
     painter.add(depth - r * 0.01 - bias, draw, layer)
 
 
+def ribbon_pts(width_fn, s0, s1, n=22, cap_n=9):
+    """把"沿体轴的半宽函数"变成一条圆头的闭合有机轮廓(2D 局部坐标, +x 为前)。
+
+    蛙、虫的身体都不是椭圆——前窄后宽、肩部略收、吻端圆钝。这里只描述
+    "每个 s 处有多宽", 两端自动补半圆帽, 得到的就是一条平滑闭合曲线。
+    """
+    pts = []
+    for i in range(n + 1):                       # 右侧: 后 → 前
+        s = s0 + (s1 - s0) * i / n
+        pts.append((s, max(0.0, width_fn(s))))
+    r_cap = max(0.0, width_fn(s1))
+    if r_cap > 0.01:                             # 吻端圆帽
+        for i in range(1, cap_n):
+            a = -math.pi / 2 + math.pi * i / cap_n
+            pts.append((s1 + math.cos(a) * r_cap, math.sin(a) * r_cap))
+    for i in range(n, -1, -1):                   # 左侧: 前 → 后
+        s = s0 + (s1 - s0) * i / n
+        pts.append((s, -max(0.0, width_fn(s))))
+    r_cap = max(0.0, width_fn(s0))
+    if r_cap > 0.01:                             # 尾端圆帽
+        for i in range(1, cap_n):
+            a = math.pi / 2 + math.pi * i / cap_n
+            pts.append((s0 + math.cos(a) * r_cap, math.sin(a) * r_cap))
+    return pts
+
+
+def scaled2d(pts, k, lx=0.0, ly=0.0):
+    """2D 点列绕原点缩放并平移(做体块分层/高光内缩用)。"""
+    return [(x * k + lx, y * k + ly) for x, y in pts]
+
+
+def loft(painter, cam, section, c_side, c_top, layers=16, bias=0.0, layer=4,
+         edge_k=0.64, light_mix=0.10):
+    """把同一条闭合轮廓按高度逐层收拢堆叠成体块(底大顶小) → 连续的曲面明暗。
+
+    section(f) 返回第 f 层(0=底, 1=顶)的世界坐标点列; 层与层之间用极小的色差,
+    叠出来是光滑的球面渐变, 而不是"梯田"。用于蛙体、果蝇胸腹这类有厚度的躯干。
+    """
+    layers = max(3, int(layers))
+    for i in range(layers):
+        f = i / (layers - 1)
+        col = mix(shade(c_side, edge_k), add_light(c_top, light_mix), f ** 0.9)
+        flat_polygon(painter, cam, section(f), col, bias=bias + f * 0.03, layer=layer)
+
+
 def dome(painter, cam, pts3, color, bias=0.0, layer=4, outline=None, owidth=1,
-         sheen=0.35):
+         sheen=0.35, color_top=None, steps=4, spread=0.13):
     """把水平多边形画成受光的穹顶/叶片：边缘压暗, 内缩逐层向光面提亮, 再点一块高光。
 
     用于青蛙身体、荷叶、石头顶面这类"有厚度、被光照到"的平面物。
@@ -272,12 +451,12 @@ def dome(painter, cam, pts3, color, bias=0.0, layer=4, outline=None, owidth=1,
     span = max(2.0, sum(math.hypot(p[0] - cx, p[1] - cy) for p in pts2d) / len(pts2d))
     lx, ly = _screen_light(cam)
     edge = shade(color, EDGE_K)
-    lit = add_light(shade(color, LIT_K), 0.04)
+    lit = add_light(shade(color_top if color_top is not None else color, LIT_K), 0.04)
     inner = []
-    for i in range(1, 5):
-        f = i / 4
+    for i in range(1, steps + 1):
+        f = i / steps
         k = 1.0 - 0.30 * f
-        ox, oy = lx * span * 0.13 * f, ly * span * 0.13 * f
+        ox, oy = lx * span * spread * f, ly * span * spread * f
         inner.append(([(cx + (px - cx) * k + ox, cy + (py - cy) * k + oy)
                        for px, py in pts2d], mix(edge, lit, (f ** 0.9) * 0.92)))
     # 高光跟随形状：再叠几层向光侧偏移的小内缩多边形, 比画一颗亮圆点自然得多
@@ -342,7 +521,7 @@ def blob(painter, cam, cx, cy, z0, rx, ry, height, color, heading=0.0, layers=6,
 
 
 def segment(painter, cam, a, b, color, width=2, bias=0.0, layer=4):
-    """两点间线段。bias>0 = 视觉上后置（先绘制，可被同位置的身体遮住根部）。"""
+    """两点间线段。bias>0 = 视觉上前置(与 flat_polygon/blob/sphere 一致)。"""
     va, vb = cam.view(a), cam.view(b)
     near = cam.NEAR
     da, db = va[2] - near, vb[2] - near
@@ -364,10 +543,47 @@ def segment(painter, cam, a, b, color, width=2, bias=0.0, layer=4):
     def draw(s, pa=pa, pb=pb, c=color, w=width):
         pygame.draw.line(s, c, (pa[0], pa[1]), (pb[0], pb[1]), w)
 
-    painter.add(depth + bias, draw, layer)
+    painter.add(depth - bias, draw, layer)
+
+
+def translucent_polys(painter, cam, items, alpha=110, bias=0.0, layer=4):
+    """半透明面片组(翅膀/蹼膜): 先画进独立 SRCALPHA 面, 再整体带 alpha 贴回。
+
+    pygame.draw 直接写像素不做混合, 所以半透明只能靠 "独立面 + blit" 实现。
+    同一组面片内部是覆盖关系, 这一组对外是一次混合, 视觉上正是翅膜该有的样子。
+    items: [(世界坐标点列, 颜色)]
+    """
+    polys, box = [], None
+    for pts3, color in items:
+        pts2 = [cam.project(p) for p in pts3]
+        if any(p is None for p in pts2):
+            return
+        xy = [(p[0], p[1]) for p in pts2]
+        polys.append((xy, color))
+        xs = [p[0] for p in xy]
+        ys = [p[1] for p in xy]
+        b = (min(xs), min(ys), max(xs), max(ys))
+        box = b if box is None else (min(box[0], b[0]), min(box[1], b[1]),
+                                     max(box[2], b[2]), max(box[3], b[3]))
+    if box is None:
+        return
+    x0, y0 = int(box[0]) - 2, int(box[1]) - 2
+    w = max(2, int(box[2]) - x0 + 2)
+    h = max(2, int(box[3]) - y0 + 2)
+    if w > 3000 or h > 3000:
+        return
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    for xy, color in polys:
+        pygame.draw.polygon(surf, color, [(px - x0, py - y0) for px, py in xy])
+    surf.set_alpha(alpha)
+    p0 = cam.project(items[0][0][0])
+    depth = p0[2] if p0 else 1.0
+    painter.add(depth - bias, lambda s, surf=surf, x0=x0, y0=y0: s.blit(surf, (x0, y0)),
+                layer)
 
 
 def polyline(painter, cam, pts3, color, width=1, layer=4):
+    """折线。层内深度取各点均值。"""
     pts2 = [cam.project(p) for p in pts3]
     if any(p is None for p in pts2):
         return
@@ -382,12 +598,10 @@ def polyline(painter, cam, pts3, color, width=1, layer=4):
 
 def limb(painter, cam, a, b, r0, color, bias=0.0, layer=4, taper=0.62,
          shade_ratio=0.86, cap=False):
-    """锥形肢体/茎：近端半径 r0、远端 r0×taper，带圆柱明暗。
+    """锥形肢体/茎：近端半径 r0、远端 r0×taper, 带圆柱明暗。
 
-    用于青蛙与果蝇的腿、芦苇茎等"有粗细变化的杆状物"——比等宽线段更像肢体。
-    关节处用亮色填充(不是暗色圆帽), 这样两段肢体接在一起看不出"球关节"。
-    cap=False(默认) 不加末端圆帽：相邻两段共用同一端点时天然连成一根肢体。
-    bias>0 = 视觉上后置(与 segment 一致)。
+    以前用"粗线段"画, 近距离放大就露出方头和方肩; 现在画的是真正的胶囊多边形
+    (两侧切线 + 两端半圆), 再叠一层向光偏移的亮面, 粗肢体也圆润。
     """
     va, vb = cam.view(a), cam.view(b)
     near = cam.NEAR
@@ -405,29 +619,63 @@ def limb(painter, cam, a, b, r0, color, bias=0.0, layer=4, taper=0.62,
     depth = (pa[2] + pb[2]) / 2
     ra = cam.screen_radius(r0, pa[2])
     rb = cam.screen_radius(r0 * taper, pb[2])
-    if ra < 0.6 and rb < 0.6:
+    if max(ra, rb) < 0.55:
         return
+    ax, ay = pa[0], pa[1]
+    bx, by = pb[0], pb[1]
+    dx, dy = bx - ax, by - ay
+    L = math.hypot(dx, dy)
+    if L < 1e-3:
+        return
+    ux, uy = dx / L, dy / L
+    nx, ny = -uy, ux
+    base = math.atan2(ny, nx)
     lx, ly = _screen_light(cam)
     dark = shade(color, shade_ratio)
     core = mix(color, add_light(color, 0.18), 0.5)
 
-    def draw(s, pa=pa, pb=pb, ra=ra, rb=rb, lx=lx, ly=ly, dark=dark, core=core):
-        steps = 2 if max(ra, rb) < 4.5 else 3        # 细肢体少画一段
-        for i in range(steps):
-            f0, f1 = i / steps, (i + 1) / steps
-            p0 = (pa[0] + (pb[0] - pa[0]) * f0, pa[1] + (pb[1] - pa[1]) * f0)
-            p1 = (pa[0] + (pb[0] - pa[0]) * f1, pa[1] + (pb[1] - pa[1]) * f1)
-            w0 = max(1.0, ra + (rb - ra) * f0)
-            pygame.draw.line(s, dark, p0, p1, max(2, int(w0 * 2)))
-            ox, oy = lx * w0 * 0.34, ly * w0 * 0.34
-            pygame.draw.line(s, core, (p0[0] + ox, p0[1] + oy), (p1[0] + ox, p1[1] + oy),
-                             max(1, int(w0)))
-        # 只在需要圆头时补端帽(细趾/触角), 粗肢体不加——否则每段之间都顶着一颗"珠子"
+    if max(ra, rb) < 2.2:
+        # 远/细肢体: 屏幕上一两个像素宽, 胶囊多边形看不出区别, 直接用线段更快
+        a2, b2 = (pa[0], pa[1]), (pb[0], pb[1])
+
+        def draw_thin(s, a2=a2, b2=b2, ra=ra, rb=rb, dark=dark, core=core,
+                      lx=lx, ly=ly, cap=cap):
+            w = max(ra, rb)
+            pygame.draw.line(s, dark, a2, b2, max(2, int(w * 2)))
+            ox, oy = lx * w * 0.5, ly * w * 0.5
+            pygame.draw.line(s, core, (a2[0] + ox, a2[1] + oy), (b2[0] + ox, b2[1] + oy),
+                             max(1, int(w)))
+            if cap and ra >= 1.2:
+                pygame.draw.circle(s, core, (int(a2[0]), int(a2[1])), max(1, int(ra * 0.8)))
+
+        painter.add(depth - bias, draw_thin, layer)
+        return
+
+    def outline(ra_, rb_, ox=0.0, oy=0.0):
+        pts = [(ax + nx * ra_ + ox, ay + ny * ra_ + oy),
+               (bx + nx * rb_ + ox, by + ny * rb_ + oy)]
+        for i in range(1, 4):
+            ang = base - math.pi * i / 4
+            pts.append((bx + math.cos(ang) * rb_ + ox, by + math.sin(ang) * rb_ + oy))
+        pts.append((ax - nx * ra_ + ox, ay - ny * ra_ + oy))
+        for i in range(1, 4):
+            ang = base + math.pi + math.pi * i / 4
+            pts.append((ax + math.cos(ang) * ra_ + ox, ay + math.sin(ang) * ra_ + oy))
+        return pts
+
+    edge_pts = outline(ra, rb)
+    hi_pts = outline(max(0.4, ra * 0.60), max(0.4, rb * 0.60),
+                     lx * ra * 0.32, ly * ra * 0.32)
+
+    def draw(s, edge_pts=edge_pts, hi_pts=hi_pts, dark=dark, core=core,
+             ra=ra, rb=rb, ax=ax, ay=ay, bx=bx, by=by, lx=lx, ly=ly, cap=cap):
+        pygame.draw.polygon(s, dark, edge_pts)
+        pygame.draw.polygon(s, core, hi_pts)
         if cap and ra >= 2.0:
-            pygame.draw.circle(s, core, (int(pa[0] + lx * ra * 0.30),
-                                         int(pa[1] + ly * ra * 0.30)), max(1, int(ra * 0.86)))
+            pygame.draw.circle(s, core, (int(ax + lx * ra * 0.30),
+                                         int(ay + ly * ra * 0.30)), max(1, int(ra * 0.8)))
         if cap and rb >= 2.0:
-            pygame.draw.circle(s, core, (int(pb[0] + lx * rb * 0.30),
-                                         int(pb[1] + ly * rb * 0.30)), max(1, int(rb * 0.86)))
+            pygame.draw.circle(s, core, (int(bx + lx * rb * 0.30),
+                                         int(by + ly * rb * 0.30)), max(1, int(rb * 0.8)))
 
     painter.add(depth + bias, draw, layer)

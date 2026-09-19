@@ -10,9 +10,10 @@ from __future__ import annotations
 import math
 import random
 
+import numpy as np
 import pygame
 
-from render3d import (LIGHT_XY, V3, add_light, clamp, dome, flat_polygon, mix,
+from render3d import (LIGHT_XY, V3, add_light, clamp, dome, flat_polygon, limb, mix,
                       polyline, segment, shade, soft_shadow, sphere,
                       Painter)
 
@@ -185,109 +186,140 @@ def draw_sky(surf, cam, t):
         surf.blit(img, (int(sx - w / 2), int(sy - h / 2)))
 
 
-def caustic(x, y, t):
-    """焦散光斑场：两组波纹光丝的乘积 × 低频明暗遮罩，随时间流动。"""
-    v1 = math.sin(x * 0.037 + 2.6 * math.sin(y * 0.017 + t * 0.35))
-    v2 = math.sin(y * 0.021 + 2.2 * math.sin(x * 0.041 + 2.1 + t * 0.28))
-    m = 0.5 + 0.5 * math.sin(x * 0.008 + y * 0.006) * np_sin_mix(x, y)
-    return (math.exp(-(v1 * v1) * 4.0) * math.exp(-(v2 * v2) * 4.0)) * (0.30 + 0.70 * m)
+# ---------------------------------------------------------------- 水面(逐像素)
+# 水面是整幅画面最大的一块, 用多边形拼必然露格子。这里改成"逐像素解析":
+# 每个像素反投影到 z=0 的水面上得到世界坐标, 再解析地算浅深、菲涅尔天空反射、
+# 焦散与涟漪。静态部分(遮罩+基础水色)按机位缓存, 每帧只算会动的那几项。
+WATER_Q = 2                              # 静止机位: 1/2 分辨率(焦散最锐)
+WATER_Q_MOVING = 3                       # 转动镜头时降到 1/3: 每帧都要重算, 省一半时间
+DEEP = (33, 74, 65)                      # 池心深水
+SHALLOW = (118, 158, 124)                # 近岸浅水(能看见塘底)
+SKY_REFLECT = (152, 186, 186)            # 掠射角反射的天光
+_WATER_CACHE: dict = {}
 
 
-def np_sin_mix(x, y):
-    return math.sin(y * 0.009 - x * 0.005)
+def _shore_mask(q, w, h, cam):
+    """岸线遮罩: 把岸线多边形投影后光栅化。
+
+    逐像素射线法(96 边 × 25 万像素)要几十毫秒; 交给 pygame 的 C 填充 + 一次
+    surfarray 读回只要 1~2 毫秒, 而且边界同样是像素级精确的。
+    """
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    pts = []
+    for (x, y, nx, ny, _s) in _shore_base():
+        d = V3(x, y, 0.3) - cam.pos
+        depth = max(cam.NEAR * 0.5, d.dot(cam.fwd))     # 近平面之后按夹住的深度投影
+        pts.append(((cam.cx + cam.focal * d.dot(cam.right) / depth) / q,
+                    (cam.cy - cam.focal * d.dot(cam.up) / depth) / q))
+    pygame.draw.polygon(surf, (255, 255, 255, 255), pts)
+    return np.ascontiguousarray(pygame.surfarray.array_alpha(surf).T > 127)
 
 
-def water_color(x, y, t):
-    """水面底色：南北大气渐变 + 中心加深的深水区 + 极缓的涌浪。
+def _water_plane(cam, q=WATER_Q):
+    """屏幕像素 → 水面世界坐标 + 岸线遮罩 + 基础水色(带机位缓存)。"""
+    key = (round(cam.pos.x, 2), round(cam.pos.y, 2), round(cam.pos.z, 2),
+           round(cam.fwd.x, 4), round(cam.fwd.y, 4), round(cam.fwd.z, 4),
+           round(cam.right.x, 4), round(cam.right.y, 4), round(cam.right.z, 4),
+           round(cam.up.x, 4), round(cam.up.y, 4), round(cam.up.z, 4),
+           round(cam.focal, 1), cam.w, cam.h, q)
+    hit = _WATER_CACHE.get(key)
+    if hit is not None:
+        return hit
+    w, h = max(1, cam.w // q), max(1, cam.h // q)
+    px = (np.arange(w) + 0.5) * q
+    py = (np.arange(h) + 0.5) * q
+    X = (px - cam.cx) / cam.focal
+    Y = -(py - cam.cy) / cam.focal
+    rx, ry, rz = cam.right
+    ux, uy, uz = cam.up
+    fx, fy, fz = cam.fwd
+    Dx = fx + X[None, :] * rx + Y[:, None] * ux
+    Dy = fy + X[None, :] * ry + Y[:, None] * uy
+    Dz = fz + X[None, :] * rz + Y[:, None] * uz
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tt = np.where(Dz < -1e-4, -cam.pos.z / Dz, np.inf)
+    tt = np.where(np.isfinite(tt), tt, 0.0).astype(np.float32)   # 打不到水面的像素归零
+    wx = cam.pos.x + Dx * tt
+    wy = cam.pos.y + Dy * tt
+    mask = _shore_mask(q, w, h, cam) & (tt > 0.0)
+    nrm = np.sqrt(Dx * Dx + Dy * Dy + Dz * Dz)
+    graze = np.clip(1.0 - np.abs(Dz) / np.maximum(nrm, 1e-6), 0.0, 1.0) ** 2.2
+    rr = np.sqrt((wx / POND_W2) ** 2 + (wy / POND_H2) ** 2)
+    # 浅水是"贴着岸的一圈": rr→1(岸线) 时最浅, 池心(rr→0)最深。
+    # 之前写成 (1-rr) 正好反了——池心发亮、四角最黑, 看着就像池塘四角糊了墨。
+    shallow = np.clip((rr - 0.58) / 0.46, 0.0, 1.0) ** 0.90   # 宽而缓的浅滩过渡
+    deep = np.array(DEEP, np.float32)
+    near = np.array(SHALLOW, np.float32)
+    sky = np.array(SKY_REFLECT, np.float32)
+    col = deep + (near - deep) * shallow[..., None]
+    col = col + (sky - col) * (graze * 0.24)[..., None]
+    swell = 0.5 + 0.5 * np.sin(wx * 0.0042) * np.sin(wy * 0.0051)   # 大尺度涌浪
+    col = col * (0.965 + 0.07 * swell)[..., None]
+    base = np.zeros((h, w, 4), np.uint8)
+    base[..., :3] = np.clip(col, 0, 255).astype(np.uint8)
+    base[..., 3] = np.where(mask, 255, 0).astype(np.uint8)
+    hit = {"base": base, "wx": wx, "wy": wy, "mask": mask, "shallow": shallow,
+           "size": (w, h), "q": q}
+    if len(_WATER_CACHE) > 8:
+        _WATER_CACHE.clear()
+    _WATER_CACHE[key] = hit
+    return hit
 
-    刻意不引入高频项——底色按大格绘制，格内是纯色，只有低频变化才不会露出格子接缝；
-    高频的水纹交给上面那层小碎块与焦散闪点。"""
-    f = (y + POND_H2) / (2 * POND_H2)
-    base = _lerp_color(WATER_S, WATER_M, f * 2.0) if f < 0.5 \
-        else _lerp_color(WATER_M, WATER_N, (f - 0.5) * 2.0)
-    r = math.hypot(x / POND_W2, y / POND_H2)          # 池心水深更大, 颜色更沉
-    base = _lerp_color(base, (24, 60, 52), 0.16 * clamp(1.12 - r, 0.0, 1.0))
-    swell = math.sin(x * 0.0042 + t * 0.21) * math.sin(y * 0.0051 - t * 0.17)
-    return mix(base, GLINT, 0.022 * swell + 0.010)
 
+def draw_pond(painter, cam, t, moving=False):
+    """水面(逐像素解析) + 岸边浅水带 + 水线亮边。
 
-def draw_pond(painter, cam, t):
-    """水面（大气渐变 + 涌浪 + 细纹）+ 焦散 + 岸边泡沫。"""
-    # 底色只随 y 缓慢变化 → 行分得细(梯度平滑)、列分得粗(横向几乎不变), 既没有接缝也不贵
-    rows, cols = 40, 8
-    for i in range(rows):
-        y0 = -POND_H2 + 2 * POND_H2 * i / rows
-        y1 = -POND_H2 + 2 * POND_H2 * (i + 1) / rows
-        for j in range(cols):
-            x0 = -POND_W2 + 2 * POND_W2 * j / cols
-            x1 = -POND_W2 + 2 * POND_W2 * (j + 1) / cols
-            flat_polygon(painter, cam,
-                         [V3(x0, y0, 0), V3(x1, y0, 0), V3(x1, y1, 0), V3(x0, y1, 0)],
-                         water_color((x0 + x1) / 2, (y0 + y1) / 2, t), layer=0)
-    # 高频水纹：短横划(读作水面细波), 比统一网格细, 不会出现方块接缝
-    for gi in range(24):
-        for gj in range(16):
-            r1 = _hash01(gi, gj, 3)
-            if r1 < 0.55:
-                continue
-            x = -POND_W2 + 1240 * (gi + _hash01(gi, gj, 11)) / 24
-            y = -POND_H2 + 700 * (gj + _hash01(gi, gj, 12)) / 16
-            s = 4.0 + 7.0 * _hash01(gi, gj, 13)
-            a = (_hash01(gi, gj, 14) - 0.5) * 0.55        # 大体沿水面横向
-            bright = _hash01(gi, gj, 15) > 0.5
-            col = mix(water_color(x, y, t), GLINT if bright else (10, 34, 32),
-                      0.030 + 0.045 * (r1 - 0.55) / 0.45)
-            dx, dy = math.cos(a) * s, math.sin(a) * s * 0.30
-            flat_polygon(painter, cam,
-                         [V3(x - dx, y - dy, 0.06), V3(x + dx, y + dy, 0.06),
-                          V3(x + dx, y + dy + 0.9, 0.06), V3(x - dx, y - dy + 0.9, 0.06)],
-                         col, layer=1)
-    for k in range(18):                                   # 水下泥沙明暗斑(大而淡)
-        x = -POND_W2 + 80 + _hash01(k, 41, 31) * (2 * POND_W2 - 160)
-        y = -POND_H2 + 60 + _hash01(k, 42, 31) * (2 * POND_H2 - 120)
-        r = 46 + 90 * _hash01(k, 43, 31)
-        tone = (16, 44, 38) if _hash01(k, 44, 31) > 0.5 else GLINT
-        col = mix(water_color(x, y, t), tone, 0.10 + 0.06 * _hash01(k, 45, 31))
-        rot = _hash01(k, 46, 31) * math.tau
-        flat_polygon(painter, cam,
-                     [V3(x + math.cos(rot + a * 0.9) * r,
-                         y + math.sin(rot + a) * r * 0.68, 0.03)
-                      for a in [2 * math.pi * i / 8 for i in range(8)]],
-                     col, layer=1)
-    for gx in range(36):                                  # 焦散闪点：小而淡, 避免悬浮感
-        for gy in range(24):
-            x = -POND_W2 + 1240 * gx / 35
-            y = -POND_H2 + 700 * gy / 23
-            c = caustic(x, y, t)
-            if c > 0.70:
-                k = int(30 + 78 * (c - 0.70) / 0.30)
-                s = 2.6 + 2.8 * (c - 0.70)
-                a = t * 0.6 + x * 0.01
-                pts = [V3(x + s * math.cos(a), y + s * math.sin(a), 0.16),
-                       V3(x - s * math.sin(a), y + s * math.cos(a), 0.16),
-                       V3(x - s * math.cos(a), y - s * math.sin(a), 0.16),
-                       V3(x + s * math.sin(a), y - s * math.cos(a), 0.16)]
-                flat_polygon(painter, cam, pts, (int(k * 0.55), k, int(k * 0.8)), layer=1)
-    # 会动的水线与浅水带：轻微吞吐, 画在 BANK 层(晚于机位缓存的静态沙滩与焦散)。
+    水面图像每 3 帧重建一次: 焦散本身是慢动作, 复用上一张完全看不出来,
+    但每帧省下的 numpy 混合与缩放是实打实的。
+    """
+    wp = _water_plane(cam, WATER_Q_MOVING if moving else WATER_Q)
+    st = wp
+    if st.get("surf") is None or st.get("age", 0) >= 3:
+        wx, wy, mask, shallow = wp["wx"], wp["wy"], wp["mask"], wp["shallow"]
+        arr = wp["base"].copy()
+        if mask.any():
+            mx, my, ms = wx[mask], wy[mask], shallow[mask]
+            # 焦散: 两个方向都被慢波扭曲的正弦坐标系取"细亮线", 相乘成交叉光网。
+            u = (mx * 0.026 + 0.95 * np.sin(my * 0.011 + t * 0.20)
+                 + 0.45 * np.sin(mx * 0.008 - t * 0.13))
+            v = (my * 0.023 + 0.95 * np.sin(mx * 0.013 - t * 0.17)
+                 + 0.45 * np.sin(my * 0.009 + t * 0.15))
+            l1 = np.abs(np.sin(u)) ** 16
+            l2 = np.abs(np.sin(v)) ** 16
+            glow = np.clip(l1 + l2 + 1.5 * l1 * l2, 0.0, 1.0) * 0.44 * (0.30 + 0.70 * ms)
+            sub = arr[mask]
+            rgb = sub[:, :3].astype(np.float32)
+            glint = np.array(GLINT, np.float32)
+            rgb += (glint - rgb) * (glow * 0.34)[:, None]
+            sub[:, :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+            arr[mask] = sub
+        surf = pygame.image.frombuffer(arr.tobytes(), wp["size"], "RGBA")
+        st["surf"] = pygame.transform.smoothscale(surf, (cam.w, cam.h))
+        ys, xs = np.nonzero(mask)
+        q = wp["q"]                        # 必须用这张水面实际用的倍率(转动时是 WATER_Q_MOVING)
+        st["box"] = ((int(xs.min()) * q, int(ys.min()) * q,
+                      int(xs.max()) * q + q, int(ys.max()) * q + q)
+                     if xs.size else (0, 0, 0, 0))
+        st["age"] = 0
+    st["age"] = st.get("age", 0) + 1
+    img, (bx0, by0, bx1, by1) = st["surf"], st["box"]
+    if bx1 > bx0:
+        rect = pygame.Rect(bx0, by0, bx1 - bx0, by1 - by0)
+        rect = rect.clip(pygame.Rect(0, 0, cam.w, cam.h))
+        painter.add(1e9, lambda s, img=img, rect=rect: s.blit(img, rect.topleft, rect),
+                    Painter.WATER)
+
+    # 岸边: 贴在水侧的亮边(会随吞吐轻微移动, 画在 BANK 层)
     shore = shore_line(t)
     n_s = len(shore)
-    for i in range(n_s):                                  # 浅水带: 靠岸 30 单位内的透亮水色
-        x0, y0, nx0, ny0, _ = shore[i]
-        x1, y1, nx1, ny1, _ = shore[(i + 1) % n_s]
-        flat_polygon(painter, cam,
-                     [V3(x0 + nx0 * 30, y0 + ny0 * 30, 0.05),
-                      V3(x1 + nx1 * 30, y1 + ny1 * 30, 0.05),
-                      V3(x1, y1, 0.05), V3(x0, y0, 0.05)],
-                     mix(water_color((x0 + x1) / 2, (y0 + y1) / 2, t),
-                         (176, 218, 200), 0.26), layer=Painter.BANK)
-    for i in range(n_s):                                  # 水线亮边(贴在水侧)
+    for i in range(n_s):
         x0, y0, nx0, ny0, _ = shore[i]
         x1, y1, nx1, ny1, _ = shore[(i + 1) % n_s]
         flat_polygon(painter, cam,
                      [V3(x0, y0, 0.34), V3(x1, y1, 0.34),
                       V3(x1 + nx1 * 2.4, y1 + ny1 * 2.4, 0.34),
                       V3(x0 + nx0 * 2.4, y0 + ny0 * 2.4, 0.34)],
-                     mix(FOAM, WATER_S, 0.30), layer=Painter.BANK)
+                     mix(FOAM, (150, 190, 176), 0.35), layer=Painter.BANK)
 
 
 def draw_beach_base(painter, cam):
@@ -380,8 +412,8 @@ class LilyPad3D:
     def leaf_pts(self, z, scale=1.0):
         pts = [V3(self.pos.x, self.pos.y, z)]
         a0 = self.notch + 0.30
-        for i in range(19):
-            a = a0 + (2 * math.pi - 0.60) * i / 18
+        for i in range(33):
+            a = a0 + (2 * math.pi - 0.60) * i / 32
             pts.append(V3(self.pos.x + math.cos(a) * self.r * scale,
                           self.pos.y + math.sin(a) * self.r * 0.92 * scale, z))
         return pts
@@ -405,13 +437,19 @@ class LilyPad3D:
         soft_shadow(painter, cam, V3(self.pos.x + 4, self.pos.y + 5, 0.25),
                     self.r * 1.02, self.r * 0.94, 0.72, bias=-4, layer=3)
         # 叶缘厚度：略大一圈的深色叶子垫在下面, 露出一点点边
-        flat_polygon(painter, cam, [V3(p.x + 1.6, p.y + 2.0, p.z - 0.35)
-                                    for p in self.leaf_pts(z, 1.045)],
-                     shade(base, 0.52), bias=-1.5, layer=3)
+        flat_polygon(painter, cam, [V3(p.x + 1.8, p.y + 2.2, p.z - 0.42)
+                                    for p in self.leaf_pts(z, 1.05)],
+                     shade(base, 0.60), bias=-1.5, layer=3, aa=True)
         dome(painter, cam, self.leaf_pts(z), base, bias=-1.0, layer=3,
-             outline=shade(base, 0.70), owidth=2, sheen=0.20)
-        flat_polygon(painter, cam, self.leaf_pts(z, 0.86), add_light(base, 0.10),
-                     bias=0.5, layer=3)
+             color_top=add_light(base, 0.10), sheen=0.26, steps=5, spread=0.10)
+        flat_polygon(painter, cam, self.leaf_pts(z + 0.5, 0.90), add_light(base, 0.07),
+                     bias=0.5, layer=3, aa=True)
+        flat_polygon(painter, cam, self.leaf_pts(z + 0.9, 0.62), add_light(base, 0.13),
+                     bias=0.6, layer=3)
+        rim2 = [V3(px, py, z + 0.35) for px, py in
+                [(p.x, p.y) for p in self.leaf_pts(z, 0.995)]]
+        polyline(painter, cam, rim2 + [rim2[0]], mix(base, (196, 232, 156), 0.40), 2,
+                 layer=3)
         # 叶脉：由叶心向叶缘放射, 越靠边越淡
         for idx, a in enumerate(self.veins):
             ang = self.notch + 0.75 + idx * (2 * math.pi - 1.5) / 6.7
@@ -419,10 +457,10 @@ class LilyPad3D:
                      self.pos.y + math.sin(ang) * self.r * 0.41, z + 0.05)
             tip = V3(self.pos.x + math.cos(ang) * self.r * 0.80,
                      self.pos.y + math.sin(ang) * self.r * 0.73, z + 0.05)
-            segment(painter, cam, V3(self.pos.x, self.pos.y, z + 0.1), mid,
-                    mix(base, (168, 214, 132), 0.32), 2, bias=0.6, layer=3)
-            segment(painter, cam, mid, tip, mix(base, (150, 200, 120), 0.18), 1,
-                    bias=0.6, layer=3)
+            segment(painter, cam, V3(self.pos.x, self.pos.y, z + 0.95), mid,
+                    mix(base, (176, 220, 140), 0.46), 2, bias=0.72, layer=3)
+            segment(painter, cam, mid, tip, mix(base, (160, 208, 128), 0.24), 1,
+                    bias=0.72, layer=3)
         for (ma, md, mr, dark) in self.marks:                    # 叶面斑纹
             px = self.pos.x + math.cos(ma) * self.r * md
             py = self.pos.y + math.sin(ma) * self.r * 0.86 * md
@@ -460,43 +498,68 @@ class LilyPad3D:
                          [tl, tip, tr, V3((tl.x + tr.x) / 2, (tl.y + tr.y) / 2, z + z_tip * 0.6)],
                          tip_col, bias=0.42, layer=3)
 
-        for i in range(8):                                    # 外层大花瓣: 粉尖
-            a = 2 * math.pi * i / 8 + self.phase + sway
-            petal(a, 2.5, 12.5, 2.2, 8.2, (238, 166, 202), (250, 196, 220))
-        for i in range(6):                                    # 内层花瓣: 更立更浅
-            a = 2 * math.pi * i / 6 + self.phase * 1.3 + 0.3
-            petal(a, 1.6, 8.0, 1.8, 9.6, (250, 196, 224), (255, 224, 238))
-        sphere(painter, cam, V3(cx, cy, z + 7.0), 3.1, (246, 212, 96), bias=0.4, layer=3)
-        for i in range(6):                                    # 花蕊
-            a = 2 * math.pi * i / 6 + 0.4
-            sphere(painter, cam, V3(cx + math.cos(a) * 2.4, cy + math.sin(a) * 2.4, z + 8.2),
-                   1.0, (252, 232, 140), bias=0.5, layer=3)
+        for i in range(7):                                    # 外层: 微微张开的花瓣
+            a = 2 * math.pi * i / 7 + self.phase + sway
+            petal(a, 2.2, 10.2, 3.0, 7.4, (236, 170, 200), (248, 202, 222))
+        for i in range(5):                                    # 内层: 立起来收成花苞
+            a = 2 * math.pi * i / 5 + self.phase * 1.3 + 0.35
+            petal(a, 1.4, 5.0, 2.6, 11.0, (248, 198, 220), (255, 228, 240))
+        sphere(painter, cam, V3(cx, cy, z + 9.4), 2.2, (250, 214, 196), bias=0.45,
+               layer=3, sheen=0.5)
 
 
 class FoodCrumb:
-    """荷叶上的食饵碎屑：果蝇的觅食目标，被啃食后缩小，8~14 秒后长回来。"""
+    """荷叶上的食饵碎屑：果蝇的觅食目标，被啃食后缩小，2.5~4 秒后长回来。
 
-    def __init__(self, pad):
+    一块碎屑同一时刻只容 1 只果蝇进食（CAPACITY=1）——这是"抢食"的物理约束：
+    认领/在途的果蝇会把后来者挤到别的荷叶上去, 或者让它在上面盘旋等位。
+    """
+
+    CAPACITY = 1                       # 同时能站几只果蝇
+
+    def __init__(self, pad, side=None):
         self.pad = pad
         self.amount = 0.0
         self.timer = random.uniform(0.5, 3.0)
         self.offset = pygame.math.Vector2(0, 0)
-        self.crowd = 0
+        self.claims = 0                # 已认领(把它当目标)的果蝇数
+        self.feeders = 0               # 正在这块碎屑上进食的果蝇数
+        self.inbound = set()           # 已认领且正在飞过来的果蝇 id(预约座位)
+        self.side = side               # 同片荷叶上的第几块(0/1): 重生在对侧半边
         self.seed_off = random.uniform(0, 6.28)
         self.respawn()
 
+    def free_slots(self, for_fly=None):
+        """还能再接纳几只 = 容量 − 正在进食 − 在途预约。
+
+        两个坑都踩过:
+          · 只按"认领数"判满 → 两只互相认领就都以为没位置, 全在天上排队(95% 时间没人吃);
+          · 只按"正在进食"判满 → 同时到达的两只会一起落下去, 超出容量。
+        现在按"进食 + 在途预约"算, 并且**排除自己**(否则自己占着自己的位, 永远不敢落)。
+        """
+        inbound = len(self.inbound - {id(for_fly)}) if for_fly is not None \
+            else len(self.inbound)
+        return max(0, self.CAPACITY - self.feeders - inbound)
+
+    def full(self, for_fly=None):
+        return self.free_slots(for_fly) <= 0
+
     def respawn(self):
-        self.amount = 4.0
-        a = random.uniform(0, math.tau)
-        # 有荷花的荷叶: 食饵放远一点, 不和花瓣/落下的果蝇挤在一起
+        self.amount = 6.0
+        # 有荷花的荷叶: 食饵放远一点, 不和花瓣/落下的果蝇挤在一起;
+        # 同片荷叶的第二块固定在对侧半边, 两块碎屑不会叠在一起
+        if self.side is None:
+            a = random.uniform(0, math.tau)
+        else:
+            a = self.side * math.pi + random.uniform(-0.6, 0.6)
         d = random.uniform(0.15, 0.5) * self.pad.r if not self.pad.flower \
             else random.uniform(0.55, 0.8) * self.pad.r
         self.offset = pygame.math.Vector2(math.cos(a) * d, math.sin(a) * d * 0.9)
 
     def bite(self, dt):
-        self.amount = max(0.0, self.amount - dt * 0.55)
+        self.amount = max(0.0, self.amount - dt * 0.8)
         if self.amount <= 0:
-            self.timer = random.uniform(6.0, 10.0)      # 吃完过一阵长回来
+            self.timer = random.uniform(2.5, 4.0)       # 吃完很快长回来(整池周转的节奏)
             return True
         return False
 
@@ -506,17 +569,22 @@ class FoodCrumb:
     def draw(self, painter, cam, t):
         if self.amount <= 0:
             return
-        s = 0.45 + 0.55 * self.amount / 4.0
+        # 画进生物层(4)而不是荷叶层(3): 层内按视深排序, 食饵落在荷叶远侧时
+        # 视深比整片叶面的平均深度大, 会被叶面整个盖住(以前单食饵随机摆放
+        # 时隐时现, 双食饵后必有一块消失)。生物层整层在荷叶之后, 一劳永逸;
+        # 和站在旁边/后面的果蝇同层按深度互相遮挡, 依然正确。
+        s = 0.45 + 0.55 * self.amount / 6.0
+        k = 1.45                                    # 食饵随果蝇体型同步放大
         cx, cy = self.pos()
-        soft_shadow(painter, cam, V3(cx + 1, cy + 1, PAD_TOP + 0.9), 5.0 * s, 3.6 * s,
-                    0.55, bias=0.05, layer=3)
+        soft_shadow(painter, cam, V3(cx + 1, cy + 1, PAD_TOP + 0.9), 5.0 * k * s,
+                    3.6 * k * s, 0.55, bias=0.05, layer=Painter.MAIN)
         grains = ((0, 0, 2.3, (162, 116, 68)), (3, 2, 1.9, (146, 100, 58)),
                   (-3, 1.5, 1.8, (172, 128, 78)), (1, -3, 1.7, (154, 108, 62)))
         for dx, dy, rr, col in grains:
-            sphere(painter, cam, V3(cx + dx * s, cy + dy * s, PAD_TOP + 1.2), rr * s,
-                   col, bias=0.2, layer=3)
-        sphere(painter, cam, V3(cx - 1.5 * s, cy - 1.5 * s, PAD_TOP + 2.1), 1.2 * s,
-               (214, 170, 116), bias=0.25, layer=3)
+            sphere(painter, cam, V3(cx + dx * k * s, cy + dy * k * s, PAD_TOP + 1.2),
+                   rr * k * s, col, bias=0.2, layer=Painter.MAIN)
+        sphere(painter, cam, V3(cx - 1.5 * k * s, cy - 1.5 * k * s, PAD_TOP + 2.1),
+               1.2 * k * s, (214, 170, 116), bias=0.25, layer=Painter.MAIN)
 
 
 def make_pads(n=6):
@@ -740,13 +808,14 @@ def draw_bank_base(painter, cam, props):
 def draw_bank_plants(painter, cam, t, props):
     """会随风摆动的部分：草丛与芦苇香蒲（每帧实时画）。"""
     h = BANK_H
-    for (gx, gy), gh, gph in props["grass"]:              # 草丛
+    for (gx, gy), gh, gph in props["grass"]:              # 草丛: 三片锥形叶, 随相位摆动
         for k in range(3):
             a = gph + k * 0.42 - 0.84
             lean = 0.45 + 0.35 * math.sin(t * 0.6 + gph + k)
-            mid = V3(gx + math.cos(a) * 3.4 * lean, gy + math.sin(a) * 3.4 * lean, h + gh * 0.55)
+            mid = V3(gx + math.cos(a) * 3.4 * lean, gy + math.sin(a) * 3.4 * lean,
+                     h + gh * 0.55)
             tip = V3(gx + math.cos(a) * 5.6 * lean, gy + math.sin(a) * 5.6 * lean, h + gh)
-            base_c = (74, 116, 54) if k % 2 else (88, 132, 62)
+            base_c = mix((70, 110, 52), (96, 140, 66), 0.35 + 0.5 * ((k * 7 + int(gph * 9)) % 3) / 2)
             segment(painter, cam, V3(gx, gy, h), mid, base_c, 2, layer=3)
             segment(painter, cam, mid, tip, add_light(base_c, 0.16), 2, layer=3)
     for (rx, ry, rh, cattail, ph2) in props["reeds"]:     # 芦苇与香蒲
@@ -754,30 +823,16 @@ def draw_bank_plants(painter, cam, t, props):
         base = V3(rx, ry, h)
         mid = V3(rx + sway * 0.45, ry + 1.5, h + rh * 0.55)
         tip = V3(rx + sway, ry, h + rh)
-        segment(painter, cam, base, mid, (52, 96, 46), 3, layer=3)
-        segment(painter, cam, mid, tip, (92, 140, 66), 3, layer=3)
-        blade_mid = V3(rx + sway * 0.5 - 5, ry - 3, h + rh * 0.45)
-        segment(painter, cam, base, blade_mid, (72, 116, 58), 2, layer=3)
-        if cattail:                                       # 香蒲穗: 圆柱 + 高光
+        limb(painter, cam, base, mid, 1.7, (56, 100, 48), taper=0.72, layer=3)
+        limb(painter, cam, mid, tip, 1.22, (96, 146, 68), taper=0.34, layer=3)
+        blade_mid = V3(rx + sway * 0.5 - 5, ry - 3, h + rh * 0.42)
+        limb(painter, cam, base, blade_mid, 1.1, (74, 120, 58), taper=0.10, layer=3)
+        if cattail:                                       # 香蒲穗: 锥形圆柱 + 受光面
             c0 = V3(rx + sway, ry, h + rh - 15)
             c1 = V3(rx + sway, ry, h + rh - 3)
-            segment(painter, cam, c0, c1, (86, 56, 32), 6, layer=3)
-            segment(painter, cam, V3(c0.x - 0.6, c0.y - 0.6, c0.z + 2),
-                    V3(c1.x - 0.6, c1.y - 0.6, c1.z - 2), (134, 92, 52), 2, layer=3)
-            segment(painter, cam, c1, V3(rx + sway, ry, h + rh + 1.5), (128, 96, 58), 2, layer=3)
-
-
-def build_vignette(w, h):
-    """四周暗角，增强纵深（2D 叠加层）。"""
-    import numpy as np
-    yy, xx = np_mgrid(h, w)
-    d = np.sqrt(((xx - w / 2) / (w * 0.55)) ** 2 + ((yy - h / 2) / (h * 0.55)) ** 2)
-    alpha = np.clip((d - 0.72) * 2.6, 0, 1) * 110
-    arr = np.zeros((h, w, 4), np.uint8)
-    arr[..., 3] = alpha.astype(np.uint8)
-    return pygame.image.frombuffer(arr.tobytes(), (w, h), "RGBA")
-
-
-def np_mgrid(h, w):
-    import numpy as np
-    return np.mgrid[0:h, 0:w]
+            limb(painter, cam, c0, c1, 2.9, (84, 54, 32), taper=1.0, layer=3)
+            limb(painter, cam, V3(c0.x - 0.7, c0.y - 0.7, c0.z + 2),
+                 V3(c1.x - 0.7, c1.y - 0.7, c1.z - 2), 1.1,
+                 add_light((84, 54, 32), 0.22), taper=0.9, layer=3)
+            limb(painter, cam, c1, V3(rx + sway, ry, h + rh + 1.5), 0.8,
+                 (128, 96, 58), taper=0.3, layer=3)
