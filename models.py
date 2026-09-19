@@ -524,20 +524,35 @@ def draw_fly(painter, cam, fly, t, pads):
     fly_amt = clamp((z - land_z * 1.1) / (4.8 * FLY_SCALE), 0.0, 1.0)
     flying = fly_amt > 0.5
     eating = fly.eating_now and fly.groom_t <= 0
+    # 领域对峙(Game._update_contests 每帧配对): 攻击方周期性冲撞(lunge)+展翅威胁,
+    # 被压方身体压低、轻微颤抖——真实果蝇食源攻击里一眼可辨的两个角色。
+    # lunge: 正弦幂调制的猛探节律(~2次/秒); crouch: 随对峙时长加深
+    lunge = crouch = tremble = 0.0
+    if getattr(fly, "contest_t", 0.0) > 0.0 and getattr(fly, "contest_foe", None) is not None:
+        if getattr(fly, "contest_role", "") == "attacker":
+            lunge = max(0.0, math.sin(fly.contest_t * 13.0)) ** 1.5
+        else:
+            crouch = clamp(fly.contest_t / 0.5, 0.0, 1.0)
+            tremble = crouch * math.sin(t * 34.0)
+    contesting = lunge > 0.0 or crouch > 0.0
     # 离地就不再摆梳洗姿势: 行为层起飞/逃跑会清 groom_t, 这里是姿态层的兜底,
-    # 否则"飞到一半还在擦眼睛"。
-    grooming = fly.groom_t > 0 and fly_amt < 0.35
+    # 否则"飞到一半还在擦眼睛"。对峙时也不再擦眼——前足要用在冲撞上。
+    grooming = fly.groom_t > 0 and fly_amt < 0.35 and not contesting
     sh = clamp(1.0 - z / 55.0, 0.25, 1.0)
     # 梳洗进度(带 0.15s 淡入淡出): 动作幅度在默认视角下必须够大才看得见
     groom_amt = 0.0
     if grooming:
         total = getattr(fly, "GROOM_TIME", 1.6)
         groom_amt = clamp(min((total - fly.groom_t) / 0.18, fly.groom_t / 0.18), 0.0, 1.0)
-    body_z = z + gz * 0.92 * (1.0 - fly_amt)
-    # 梳洗时抬头 + 轻微点头: 剪影在动, 远处一眼能看出这只虫在捣鼓什么。
-    # 俯仰别超过 ~0.15: 再大腹部后端就沉到叶面以下, 把中后腿整个埋进去
-    body = Body(fly.pos, h, body_z, scale=FLY_SCALE,
-                pitch=-0.14 * groom_amt + 0.07 * groom_amt * math.sin(t * 13.0))
+    body_z = z + gz * 0.92 * (1.0 - fly_amt) - 1.1 * crouch * (1.0 - fly_amt)
+    # 梳洗时抬头 + 轻微点头; 攻击冲撞时抬前身向对手探出; 被压方低头伏低
+    bx = fly.pos.x + fly.contest_dir.x * (2.4 * lunge) \
+        + (-fly.contest_dir.y) * (0.4 * tremble)
+    by = fly.pos.y + fly.contest_dir.y * (2.4 * lunge) \
+        + fly.contest_dir.x * (0.4 * tremble)
+    body = Body((bx, by), h, body_z, scale=FLY_SCALE,
+                pitch=-0.14 * groom_amt + 0.07 * groom_amt * math.sin(t * 13.0)
+                + 0.30 * lunge - 0.06 * crouch)
     # 到叶面的世界高度差(负=在下方); 口器最多下探 2.6, 六足可以够到叶面
     surf_dz = gz + 0.35 - body_z
     prob_z = body.up(clamp(surf_dz, -2.6, 0.0))
@@ -549,7 +564,15 @@ def draw_fly(painter, cam, fly, t, pads):
         # ---- 六足: 髋→膝→跗; 空中向后收拢, 落地三角步态(摆动相抬脚) ----
         for i, (hip, knee, foot) in enumerate(FLY_LEGS):
             for m in (1, -1):
-                if grooming and i == 0:
+                if lunge > 0.05 and i == 0:
+                    # 冲撞前足: 双前足抬过头顶向对手方向猛探(真实 lunge 的"出拳"),
+                    # 高 bias 压过复眼, 和擦眼姿势同一层待遇
+                    bias = 1.30
+                    hp = body.at(hip[0], m * hip[1], 1.2)
+                    kn = body.at(knee[0] + 0.9, m * knee[1] * 0.9, 1.9 + 1.3 * lunge)
+                    ft = body.at(foot[0] + 1.0 + 2.4 * lunge, m * foot[1] * 0.7,
+                                 2.1 + 2.8 * lunge)
+                elif grooming and i == 0:
                     # 前足举到复眼"上方"画圈擦洗。
                     # 关键: 脚要抬得比眼顶(z≈4.4)更高、并且用更高的 bias 画,
                     # 否则会被头和复眼整个盖住——之前就是这样, 动作在做却看不见。
@@ -660,4 +683,5 @@ def draw_fly(painter, cam, fly, t, pads):
         # 梳洗时翅膀轻微抬起并颤动: 翅是全身最大的一块, 剪影变化远看也认得出
         quiver = 0.20 * groom_amt * (0.55 + 0.45 * math.sin(t * 17))
         _fly_wings(p, c, fly, body,
-                   spread=clamp(fly_amt * 1.25 + quiver, 0.0, 1.0), flying=flying)
+                   spread=clamp(fly_amt * 1.25 + quiver + 0.32 * lunge, 0.0, 1.0),
+                   flying=flying)   # 冲撞时翅膀同步半展(展翅威胁)

@@ -232,6 +232,12 @@ class FlyBase:
         self.alive = True
         self.buzz_jitter = random.Random(seed).uniform(0.85, 1.15)
         self.pick_bias = random.Random(seed + 7).uniform(0.8, 1.2)   # 选食个体偏好(拆雷群)
+        # 领域对峙状态(每帧由 Game._update_contests 重建): 攻击方做冲撞动作,
+        # 被压方伏低退让, 满 0.5s 后弃食让座
+        self.contest_t = 0.0            # 对峙持续时长
+        self.contest_foe = None         # 对手个体
+        self.contest_dir = V2(0, 0)     # 攻击方指向对手 / 被压方背离对手
+        self.contest_role = ""          # "attacker" / "victim" / ""
         self.groom_t = 0.0             # 擦眼睛(梳洗)剩余时长
         self.groom_cd = random.uniform(5.0, 9.0)
         self.food = None               # 当前认领的食饵(抢食统计用)
@@ -296,7 +302,6 @@ class ScriptedFly(FlyBase):
         self.food = None
         self.flee_t = 0.0
         self.eat_t = 0.0
-        self.displace_t = 0.0          # 被神经元个体逼近时的对峙计时
         self.yielded = 0               # 统计: 让位次数
         self.loiter_t = 0.0            # 满座盘旋等位的计时(超过就放弃)
         self._approach_t = 0.0         # 近场进近滞留计时(兜底防追踪极限环)
@@ -318,19 +323,12 @@ class ScriptedFly(FlyBase):
         dfrog = self.pos.distance_to(frog.pos)
         if self.state != "逃离" and dfrog < 110:
             self._flee(frog.pos, 1.1)
-        # 领域让位(荷叶级): 神经元个体落在这片荷叶上 → 半秒内弃食让座。
-        # 真实果蝇的食源攻击就是"领域占有者驱逐入侵者"; 只认"它已落地",
-        # 空中路过/盘旋不算威胁。被挤开不像躲青蛙那样惊慌, 回巡航高度飞走
-        if (self.state == "进食" and brain_fly is not None and brain_fly.alive
-                and brain_fly.resting and brain_fly.z < FlyBase.LAND_Z + 6
-                and brain_fly.pos.distance_to(self.pos) < 72):
-            self.displace_t += dt
-            if self.displace_t > 0.5:
-                self.displace_t = 0.0
-                self.yielded += 1
-                self._flee(brain_fly.pos, 0.8, panic=False)
-        else:
-            self.displace_t = 0.0
+        # 领域对峙: 被 Game._update_contests 标记为"正被神经元个体压制"满 0.5s
+        # 就弃食让座(动作层的伏低/颤抖/冲撞由 contest_t 驱动, 见 models.draw_fly)
+        if self.state == "进食" and self.contest_t > 0.5:
+            self.yielded += 1
+            foe = self.contest_foe if self.contest_foe is not None else frog
+            self._flee(foe.pos, 0.8, panic=False)
         if self.state == "逃离":
             self.flee_t -= dt
             self.move_body(dt, self.flee_speed, random.uniform(-1, 1) * dt * 2)
@@ -348,6 +346,9 @@ class ScriptedFly(FlyBase):
             # 否则同帧到达的两只会一起落下去(容量=1 时的竞态)
             self.eating_now = (self.groom_t <= 0 and self.z < self.LAND_Z + 3.5
                                and (self.eating_now or self.food.feeders == 0))
+            if self.contest_t > 0.3:
+                # 被顶得节节后退(背离攻击者方向), 退无可退就让位起飞
+                self.pos += self.contest_dir * 40.0 * dt
             if self.eating_now and self.food and self.food.amount > 0:
                 self.food.bite(dt)
             if self.eat_t <= 0 or not self.food or self.food.amount <= 0:
@@ -482,7 +483,14 @@ class BrainFly(FlyBase):
             self.rest_total += dt
             self._update_groom(dt)
             self.eating_now = False
-            if food and food.amount > 0:
+            if self.contest_t > 0.0 and self.contest_foe is not None:
+                # 对峙中: 转身面向对手摆好架势, 暂停爬行/进食——
+                # 周期性的冲撞猛探由姿态层(models.draw_fly)按 contest_t 叠加
+                ang = math.atan2(self.contest_foe.pos.y - self.pos.y,
+                                 self.contest_foe.pos.x - self.pos.x)
+                self.heading = lerp_angle(self.heading, ang, 1 - math.exp(-8 * dt))
+                self.move_body(dt, 0, 0)
+            elif food and food.amount > 0:
                 # 落上叶面就走过去(可能要穿过小半个荷叶), 贴近后进入死区防头尾翻转
                 if food_dist > 8:
                     target = math.atan2(food.pos().y - self.pos.y, food.pos().x - self.pos.x)
@@ -631,6 +639,7 @@ class Game:
         bf = self.brain_fly()
         for f in self.flies:
             f.update(dt, self.frog, self.crumbs, self.t, bf)
+        self._update_contests(dt)
         self.flies = [f for f in self.flies if f.alive]
         self.spawn_timer += dt
         if self.spawn_timer > 5.0 and len(self.flies) < TARGET_FLIES:
@@ -660,6 +669,45 @@ class Game:
                    default=0.0)
         self.sounds.set_buzz(max(0.0, min(1.0, buzz)) * 0.55)
         self.shake = max(0.0, self.shake - dt)
+
+    def _update_contests(self, dt):
+        """领域对峙配对: 落定且没在进食的神经元个体 ↔ 同片荷叶上正在进食的脚本个体。
+
+        只标记状态(contest_t/foe/dir), 让位判定与对峙动作各自读取:
+        ScriptedFly 用 contest_t>0.5 让位, models.draw_fly 用它摆冲撞/伏低姿势。
+        真实果蝇的食源攻击: 优势方以后足撑地抬起前身反复冲撞(lunge)+展翅威胁,
+        劣势方伏低退让直至弃食逃走——这里把它做成看得见的戏。
+        """
+        bf = self.brain_fly()
+        old_foe = {id(f): f.contest_foe for f in self.flies}
+        if bf is not None:
+            bf.contest_t, bf.contest_foe, bf.contest_role = 0.0, None, ""
+        for f in self.flies:
+            if isinstance(f, ScriptedFly):
+                f.contest_t, f.contest_foe, f.contest_role = 0.0, None, ""
+        if bf is None or not bf.resting or bf.eating_now \
+                or bf.z > FlyBase.LAND_Z + 6:
+            return
+        nearest, nearest_d = None, 1e9
+        for f in self.flies:
+            if not isinstance(f, ScriptedFly) or f.state != "进食" or not f.alive:
+                continue
+            d = f.pos.distance_to(bf.pos)
+            if d >= 72:
+                continue
+            away = f.pos - bf.pos
+            n = away.length() or 1.0
+            f.contest_t = f.contest_t + dt if old_foe.get(id(f)) is bf else dt
+            f.contest_foe = bf
+            f.contest_dir = V2(away.x / n, away.y / n)      # 被压方: 背离攻击者的方向
+            f.contest_role = "victim"
+            if d < nearest_d:
+                nearest, nearest_d = f, d
+        if nearest is not None:
+            bf.contest_t = bf.contest_t + dt if old_foe.get(id(bf)) is nearest else dt
+            bf.contest_foe = nearest
+            bf.contest_dir = V2(-nearest.contest_dir.x, -nearest.contest_dir.y)
+            bf.contest_role = "attacker"
 
     def try_eat(self, point, radius, label):
         for f in list(self.flies):
