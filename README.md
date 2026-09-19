@@ -55,10 +55,11 @@ MuJoCo model and renders it offline. They share no code beyond `V3 = pygame.math
 
 | Subsystem | File | LoC | Responsibility |
 |---|---|---|---|
-| Game loop, agents, HUD | [`main.py`](main.py) | 1016 | 60 FPS fixed-step loop, frog kinematics, both fly classes, HUD, headless selftest |
-| Software renderer | [`render3d.py`](render3d.py) | 333 | `Camera3D` perspective projection, `Painter` depth sorter, material primitives |
+| Game loop, agents, HUD | [`main.py`](main.py) | 817 | 60 FPS fixed-step loop, frog kinematics, both fly classes, HUD, headless selftest |
+| Software renderer | [`render3d.py`](render3d.py) | 671 | `Camera3D` perspective projection, `Painter` depth sorter, creature sprite pass, material primitives |
+| Creature modelling | [`models.py`](models.py) | 473 | Shape spec tables, pose functions and shading for the frog and the fly |
 | Neural agent | [`fly_brain.py`](fly_brain.py) | 155 | LIF neuron, GF / CX / REST circuits, sensory integration, motor commands |
-| Scene | [`scenery.py`](scenery.py) | 654 | Water, caustics, ripples, lily pads, crumbs, banks, props, sky, camera-keyed cache |
+| Scene | [`scenery.py`](scenery.py) | 814 | Per-pixel water and caustics, ripples, lily pads, crumbs, banks, props, sky, camera-keyed cache |
 | Audio | [`sounds.py`](sounds.py) | 127 | Procedural synthesis at 22.05 kHz (croak, splash, crunch, wing buzz, tongue snap) |
 | FlyGym bridge | [`real_fly_demo.py`](real_fly_demo.py) | 166 | Composes NeuroMechFly in MuJoCo, renders body + retina readouts |
 
@@ -75,9 +76,9 @@ distance to threshold — this is what the `B` panel plots.
 
 | Circuit | FlyGym-free analogue | τ | Drive | Fires when |
 |---|---|---|---|---|
-| **GF** giant fibre | escape reflex | 0.05 s | `55 · max(0, 1 − d_frog/260)`, ×3 while airborne | threat inside ~170 units, or a hop shadow overhead → 0.85 s escape thrust ×3.1, then 1.6 s refractory |
-| **CX_L / CX_R** central complex | heading control | 0.25 s | competing slow oscillators | read out as an amplitude difference; produces smooth, non-periodic cruising |
-| **REST** rest/arousal | feeding gate | 0.6 s | `45 · rest_fill` while hovering and threat < 0.25 | crossing threshold releases the landing manoeuvre; abort after 2.5 s without food or 12 s of resting |
+| **GF** giant fibre | escape reflex | 0.05 s | `55 · max(0, 1 − d_frog/260)`, ×3 while airborne | threat inside ~170 units, or a hop shadow overhead → 0.85 s escape thrust ×3.1, then 1.6 s refractory; **habituates** to a repeatedly harmless stationary threat (current floor ×0.45 — still flees inside ~70 units), a hop shadow dishabituates instantly |
+| **CX_L / CX_R** central complex | heading control | 0.25 s | two slow oscillators compete | read out as amplitude difference → smooth, aperiodic cruising |
+| **REST** rest/arousal | feeding gate | 0.6 s | `45 · rest_fill` while hovering and threat < 0.32 | crossing threshold releases the landing manoeuvre; lands beside an occupied crumb and contests it — scripted flies yield (territoriality); abort after 3.5 s without food or 9 s of resting |
 | Olfactory bias | chemotaxis | — | heading nudge toward the nearest crumb | hunger state |
 
 The eight remaining agents (`ScriptedFly`) are finite-state waypoint controllers: forage → land →
@@ -87,7 +88,7 @@ observable difference between a threshold detector and a scripted trigger.
 | | `ScriptedFly` | `BrainFly` |
 |---|---|---|
 | Decision source | state machine + tuned constants | LIF membrane potentials |
-| Escape trigger | distance < 110 | GF threshold crossing (~170) |
+| Escape trigger | distance < 110 | GF threshold crossing (~170 fresh, ~70 once habituated) |
 | Feeding | timer | REST gate |
 | Introspection | none | `B` panel: per-neuron activation, live |
 | Count in pond | 8 | 1 (gold bracket + label) |
@@ -101,16 +102,33 @@ submission → per-layer depth sort → blit. Polygons are queued as closures an
 
 | Layer | Contents | Ordering rule |
 |---|---|---|
-| 0 `WATER` | water body (40 × 8 colour cells) | flat, always first |
-| 1 `FX` | ripple dashes, caustics, foam ring, ripples, duckweed | above water only |
+| 0 `WATER` | per-pixel water image (ray-cast onto z=0) | flat, always first |
+| 1 `FX` | shore line, ripples, duckweed | above water only |
 | 2 `PAD` | reserved for pad decals | — |
 | 3 `BANK` | bank walls, meadow, pebbles, rocks, bushes (cached), reeds, grass | depth-sorted, camera-keyed cache for static props |
 | 4 `MAIN` | frog, flies, particles, tongue | depth-sorted, drawn last |
+
+**One `bias` convention.** Every primitive now sorts by `depth - bias`, so a positive bias always
+means "visually in front". `limb()` / `segment()` used to use `depth + bias` (positive = behind);
+those two opposite meanings once turned "draw the front legs on top of the eyes" into "draw them
+behind the eyes". Unifying them means you no longer have to remember which primitive is inverted.
 
 **Why two layers matter.** Sorting a small creature against a huge ground polygon by mean depth
 breaks as soon as the creature is on the far half of that polygon. Splitting the scene into
 "flat, always underneath" and "volumetric, depth-sorted" removes the failure mode, and explicit
 per-object `bias` values separate coplanar parts (leaf top / veins / underside, shadow vs. body).
+
+**Creature sprite pass.** The frog and each fly are first drawn into their own 3x supersampled
+canvas (a sub-camera is just the main camera's image plane, translated and scaled), depth-sorted
+among themselves as usual, and then scaled back down into the scene. Silhouettes come out
+anti-aliased, a creature never z-fights with itself, and it costs the scene a single draw item.
+
+**Progressive anti-aliasing.** The static bank props depend only on the camera, so they live in a
+cached image: once the camera rests for ~6 frames the cache is re-rendered at 2x and scaled back,
+which smooths every sand/grass/bush outline; while orbiting it stays at 1x to keep the drag
+responsive. Shapes that move every frame (lily pads) get an anti-aliased outline drawn over the
+fill along the same edge. The water follows the same idea — analytic at 1/2 resolution when still,
+1/3 while the camera moves, which halves the cost during orbit and is invisible in motion.
 
 **Materials.** A single world-space key light (`LIGHT_XY`) drives all shading, so highlights stay
 consistent under camera orbit:
@@ -118,13 +136,18 @@ consistent under camera orbit:
 | Primitive | Use | Shading model |
 |---|---|---|
 | `sphere()` | bushes, rocks, eyes, crumbs, joints | rim-darkened base → inset light-shifted layers → specular dot → outline; small-radius LOD |
-| `dome()` | frog back/head, lily pads, pebbles, wings | edge darkening → inset highlight toward the light → sheen |
+| `dome()` | lily pads, pebbles, wing membranes, sheen bands | edge darkening → inset highlight toward the light → sheen |
+| `loft()` | frog body, fly thorax/abdomen | one outline collapsed layer by layer into a smooth curved shading ramp |
+| `limb()` | limbs, stems, wing veins | tapered capsule polygon (tangents + round caps) with a light-side face |
+| `translucent_polys()` | wing membranes, toe webbing | one SRCALPHA surface, alpha-blended as a group |
 | `soft_shadow()` | every grounded object | cached radial-falloff sprite scaled to the projected ellipse |
 | `flat_polygon()` / `segment()` / `polyline()` | water, veins, stems, tongue | flat fill with depth bias |
 
-Measured cost, headless software rendering with the entire pond in frame: **≈ 17.7 ms/frame**
-(1024 × 800 dummy SDL, Python 3.14, pygame-ce 2.5.8). The static bank layer is re-rendered only
-when the camera rig changes, which is where most of the headroom comes from.
+Measured cost, headless software rendering with the entire pond in frame and a still camera:
+**≈ 24 ms/frame** (1280 × 800 dummy SDL, Python 3.14, pygame-ce 2.5.8); orbiting the camera
+costs ≈ 42 ms/frame because both the bank cache and the water plane are rebuilt. The water image
+is rebuilt every 3rd frame (caustics are slow-moving) and the static bank layer only when the
+camera rig changes — those two caches are where the headroom comes from.
 
 ## 4 · Scenery, modelling and materials
 
@@ -141,15 +164,48 @@ texture and no audio file.
 
 | Element | Model | Texture / shading |
 |---|---|---|
-| Water | pond plane ±620 × ±350, activity region ±545 × ±285 | 3 layers: atmosphere gradient (40 × 8 cells) + drifting ripple dashes + caustic sparkle field; shoreline foam ring |
+| Water | pond plane ±620 × ±350, activity region ±545 × ±285 | every pixel is ray-cast onto the z=0 surface, then shaded analytically: depth tint, Fresnel sky reflection, a warped-sine caustic light net, foam at the waterline; the static part is cached per camera |
 | Lily pads | 6 pads, r 46–66, notch + veins + optional lotus, bobbing on `sin(1.2t + φ) · 1.6` | radial veins tapering outward, lifted near-edge rim, leaf underside, soft contact shadow |
-| Frog | dome body + head, 6 jointed legs, 3 toes each, gold eye pair with pupil glint, tongue as a 7-bead chain | dorsal ridge highlight, camouflage spots, belly shading, contact shadow |
-| Flies | 3-segment abdomen, thorax with bristles, head + antennae + halteres, 6 two-segment legs with 7 links total, veined wings | per-part shading, wing veins and leading-edge highlight, soft shadows, translucent folded wings |
+| Frog | one lofted body (30 collapsed layers along the spine), limbs folded into a Z, procedural toes with webbing, gold iris + horizontal pupil | dorsal highlight, mottling, dorsolateral folds, tympanum, jaw line, wet-skin sheen, water contact shadow |
+| Flies (`FLY_SCALE = 1.85`, scaled up so they read at pond scale) | brick-red compound eyes (flattened ellipsoids), frons and three ocelli, amber thorax / scutellum / black bristles, tapering drooping banded abdomen, glassy translucent veined wings, six legs (coxa–femur–tibia–tarsus), halteres | per-part shading, alpha-blended wing membranes, soft shadows |
 | Banks | 4 walls × 8 segments, 44-unit rim, meadow to 2600 units | wet→dry sand gradient, pebbles, rock speckle, bush clusters, haze-faded meadow, drifting clouds, horizon glow |
 
-Pose and gait logic covers four fly states — flight (wing beat, legs tucked), walking (tripod
-gait, step frequency ∝ speed), feeding (mouthparts on the crumb, front legs rubbing), grooming
-(front legs circling the eyes for 1.2 s, the real *Drosophila* cleaning behaviour).
+Shapes live as spec tables in [`models.py`](models.py) (half-width table, back-height table, joint
+chains); pose functions interpolate between states. Modelling is "read the table, pose it", not a
+long list of hand-tuned polygons.
+
+**Food competition.** A crumb is a scarce resource (2.5–4 s to grow back), holds exactly
+**one feeder at a time** (`FoodCrumb.CAPACITY = 1`), and each lily pad carries two crumbs
+on opposite sides:
+
+- pick cost = `distance ÷ free slots × individual bias (0.8–1.2)`, and fresher crumbs are
+  worth a longer flight — so flies spread out over pads instead of herd-rushing the single
+  free seat;
+- a fly en route **reserves its seat** (`inbound`, counted only within 36 units — imminent
+  arrivals); the occupancy test excludes the asker itself, otherwise a fly blocks its own
+  seat and nobody ever dares to land (a deadlock this actually hit: no fly ate 95% of the
+  time); the start-eating gate is sticky (whoever is eating keeps the seat, a newcomer
+  requires an empty one), which closes the same-frame landing race;
+- when the target is full a fly **loiters on a wide, slow circle** (turn rate varies per
+  individual so the circles don't overlap); a crumb nearly eaten bare (< 0.8 left) or a
+  3.5 s wait means moving on — waiting stays a brief contested moment, never an orbit;
+- **the neural fly is territorial**: once it lands on a pad, scripted flies feeding on that
+  pad abandon their crumbs within half a second (real Drosophila attack-and-displace at
+  food patches). Measured, it alone takes ~35% of all pond feeding time (the 9-fly average
+  is 11%) — the gold frame is not just a label, the competitive edge is visible;
+- fleeing releases the claim so the seat frees up immediately; the neural fly leaves when
+  satiated (hunger < 0.05) instead of eating a crumb down to nothing.
+
+Measured over four minutes (frog stationary): exactly one feeder per crumb (0.0%
+overshoot); loiter median under 1 s, longest ~2 s; no "circling but never eating"
+stretch past 8 s.
+
+Pose and gait logic covers four fly states — flight (22 Hz beat with the wing tips arcing up and
+down while the wings sweep fore/aft, legs trailing back), walking (tripod gait with a real swing
+phase that lifts each foot, step frequency ∝ speed), feeding (mouthparts reaching the crumb,
+front legs rubbing), grooming (front legs swept **above the head outline** in a wide arc for 1.6 s, body tilted back,
+wings quivering; every 2.5–5 s, 13% of all fly-frames — the real *Drosophila* cleaning behaviour). Wing spread is interpolated from altitude, so taking off and landing unfold
+and fold smoothly instead of snapping between two poses.
 
 ## 5 · The real fly: FlyGym / NeuroMechFly pipeline
 
@@ -245,6 +301,7 @@ Requires Python 3.10+ (developed on 3.14); dependencies are `pygame-ce` and `num
 
 ```bash
 .venv/bin/python main.py --selftest      # 1800-frame headless autopilot, asserts ≥ 1 catch
+.venv/bin/python tools/preview.py frog   # model contact sheet: frog turntable (fly/close/pond/wide/doc)
 .venv/bin/python fly_brain.py            # isolated circuit probe: reports GF spike time/distance
 ```
 
