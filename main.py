@@ -20,11 +20,10 @@ import sys
 
 import pygame
 
+import models
 import scenery
 from fly_brain import FlyBrain
-from render3d import (Camera3D, Painter, V3, add_light, blob, clamp, dome,
-                      ellipse_pts, flat_polygon, limb, mix, polyline, segment,
-                      shade, soft_shadow, sphere)
+from render3d import Camera3D, Painter, SubCamera, V3, clamp, segment, sphere
 from sounds import SoundKit
 
 W, H = 1280, 800
@@ -32,7 +31,7 @@ FPS = 60
 MARGIN_X, MARGIN_Y = 545, 285          # 蛙与虫的水面活动半幅
 EAT_RADIUS = 60                        # 跳跃落点压杀半径
 TONGUE_RANGE = 200                     # 舌头射程
-TONGUE_CATCH = 17                      # 舌尖捕获半径
+TONGUE_CATCH = int(round(17 * models.FLY_SCALE))   # 舌尖捕获半径(跟随果蝇体型)
 TONGUE_CONE = 1.15                     # 吐舌朝向锥（弧度）
 TARGET_FLIES = 9                       # 存活果蝇数（8 脚本 + 1 神经元）
 GOLD = (255, 200, 60)
@@ -71,124 +70,36 @@ def rot2(vx, vy, heading):
     return (vx * c - vy * s, vx * s + vy * c)
 
 
+def pick_food(pos, crumbs, bias=1.0):
+    """抢食规则：代价 = 距离 ÷ 空进食位 × 个体偏好。
+
+    空位多的食饵更划算 → 果蝇自然分散到不同荷叶; 余量新鲜的碎屑值得多飞一段路
+    (快见底的只顺路吃); bias 是每只果蝇固定的偏好系数(0.8~1.2), 让同时选食的
+    个体拆分到不同目标, 避免雷群式全体涌向同一个空位。全都满座时返回最近的一块,
+    调用方会让它在上面盘旋等位(而不是硬挤下去)。
+    """
+    best, best_key, fallback, fb_d = None, 1e9, None, 1e9
+    for c in crumbs:
+        if c.amount <= 0.3:
+            continue
+        d = c.pos().distance_to(pos)
+        free = c.free_slots()
+        if free <= 0:
+            if d < fb_d:
+                fallback, fb_d = c, d
+            continue
+        key = (d / (free * (0.25 + c.amount / 6.0))) * bias
+        if key < best_key:
+            best, best_key = c, key
+    return best if best is not None else fallback
+
+
 def ground_z(pos, pads, t):
     """pos 处的地面高度：落在荷叶上=叶面高度(随波起伏)，否则=水面。"""
     gz = 0.0
     for p in pads:
         gz = max(gz, p.height_at(pos, t))
     return gz
-
-
-def _capsule2(p0, p1, r0, r1, n=14):
-    """2D 胶囊轮廓(两端半径可不同)：两段半圆 + 外公切线。"""
-    ang = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
-    pts = []
-    for i in range(n + 1):
-        a = ang + math.pi / 2 + math.pi * i / n
-        pts.append((p0[0] + math.cos(a) * r0, p0[1] + math.sin(a) * r0))
-    for i in range(n + 1):
-        a = ang - math.pi / 2 + math.pi * i / n
-        pts.append((p1[0] + math.cos(a) * r1, p1[1] + math.sin(a) * r1))
-    return pts
-
-
-def _ellipse2(cx, cy, rx, ry, n=24):
-    return [(cx + math.cos(2 * math.pi * i / n) * rx,
-             cy + math.sin(2 * math.pi * i / n) * ry) for i in range(n)]
-
-
-def _quad_pts(p0, p1, p2, n=9):
-    """二次贝塞尔采样——蹼缘的凹弧用它才顺。"""
-    out = []
-    for i in range(n + 1):
-        t = i / n
-        u = 1 - t
-        out.append((u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
-                    u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1]))
-    return out
-
-
-_FOOT_CACHE: dict[tuple[int, bool], pygame.Surface] = {}
-
-# 精灵里"趾尖到脚踝"占整幅高度的比例——场景缩放要按它换算, 否则脚会被算得过大/过小
-TOE_FRAC_HIND, TOE_FRAC_FRONT = 0.42, 0.34
-FOOT_LEN_HIND, FOOT_LEN_FRONT = 18.0, 11.0      # 世界单位：后足≈体长 0.25, 前足≈后足 0.6 倍
-
-def build_foot_sprite(size=144, webbed=True, supersample=3):
-    """一只俯视的青蛙脚：脚踝在下方中央, 脚趾向上扇开。
-
-    后足 = 五趾 + 趾间蹼；前足 = 四趾无蹼。整张图按 3 倍分辨率画再平滑缩小,
-    边缘因此是抗锯齿的——这是 3D 多边形图元画不出来的效果。
-    """
-    n_toes = 5 if webbed else 4
-    S = size * supersample
-    surf = pygame.Surface((S, S), pygame.SRCALPHA)
-    # 脚踝放在图心：旋转是绕图心做的, 这样贴图时"脚踝"正好落在投影点上
-    cx, base_y = S * 0.5, S * 0.52
-    span = math.radians(96)
-    a0 = -math.pi / 2 - span / 2
-    r_base = S * 0.072
-    toes, shapes = [], []
-    for k in range(n_toes):
-        f = k / (n_toes - 1)
-        a = a0 + span * f
-        long_mid = 1.0 - 0.18 * abs(f - 0.5) * 2
-        L = S * (TOE_FRAC_HIND if webbed else TOE_FRAC_FRONT) * long_mid
-        tip = (cx + math.cos(a) * L, base_y + math.sin(a) * L)
-        r_tip = S * (0.030 if webbed else 0.024)
-        toe_base = (cx + math.cos(a) * L * 0.14, base_y + math.sin(a) * L * 0.14)
-        shapes.append(("c", (toe_base, tip, r_base, r_tip)))
-        toes.append((a, tip, r_tip, toe_base))
-    shapes.append(("p", _ellipse2(cx, base_y - S * 0.040, S * 0.130, S * 0.100)))
-    if webbed:                                   # 趾间蹼：从各趾 2/3 处拉出内凹的膜缘
-        for k in range(n_toes - 1):
-            a_0, t0, r0, b0 = toes[k]
-            a_1, t1, r1, b1 = toes[k + 1]
-            Lm = S * 0.36
-            p0 = (cx + math.cos(a_0) * Lm * 0.66, base_y + math.sin(a_0) * Lm * 0.66)
-            p1 = (cx + math.cos(a_1) * Lm * 0.66, base_y + math.sin(a_1) * Lm * 0.66)
-            amid = (a_0 + a_1) / 2
-            ctrl = (cx + math.cos(amid) * Lm * 0.46, base_y + math.sin(amid) * Lm * 0.46)
-            web = [(cx, base_y - S * 0.02)] + _quad_pts(p0, ctrl, p1, 10) + [(cx, base_y - S * 0.02)]
-            shapes.append(("p", web))
-    OUT = (48, 86, 44)
-    FILL = (96, 156, 68)
-    HI = (142, 198, 98)
-    lw = S * 0.017
-
-    def draw_shapes(color, grow):
-        for kind, data in shapes:
-            if kind == "c":
-                p0, p1, r0, r1 = data
-                pygame.draw.polygon(surf, color, _capsule2(p0, p1, r0 + grow, r1 + grow))
-            else:
-                pts = data
-                if grow:
-                    out = []
-                    for (px, py) in pts:                     # 蹼按径向膨胀出描边
-                        dx, dy = px - cx, py - (base_y - S * 0.02)
-                        d = math.hypot(dx, dy) or 1.0
-                        out.append((px + dx / d * grow, py + dy / d * grow))
-                    pts = out
-                pygame.draw.polygon(surf, color, pts)
-
-    draw_shapes(OUT, lw)
-    draw_shapes(FILL, 0.0)
-    for a, tip, r_tip, toe_base in toes:         # 趾背受光面
-        ox, oy = -math.sin(a) * r_tip * 0.45, math.cos(a) * r_tip * 0.45
-        pygame.draw.polygon(surf, HI, _capsule2(
-            (toe_base[0] + ox, toe_base[1] + oy), (tip[0] + ox * 0.6, tip[1] + oy * 0.6),
-            max(1.0, r_tip * 0.44), max(1.0, r_tip * 0.34)))
-    pygame.draw.polygon(surf, HI, _ellipse2(cx - S * 0.024, base_y - S * 0.072,
-                                            S * 0.062, S * 0.050))
-    return pygame.transform.smoothscale(surf, (size, size))
-
-
-def foot_sprite(size=144, webbed=True):
-    key = (size, webbed)
-    if key not in _FOOT_CACHE:
-        _FOOT_CACHE[key] = build_foot_sprite(size, webbed=webbed)
-    return _FOOT_CACHE[key]
 
 
 # ---------------------------------------------------------------- 青蛙
@@ -213,14 +124,14 @@ class Frog:
         self._trail = 0.0
         self._moving = False
         rng = random.Random(9)
-        self.skin_spots = [((rng.uniform(-34, 34), rng.uniform(-22, 22)), rng.uniform(3.0, 5.5))
-                           for _ in range(6)]  # 迷彩色皮肤斑点(预生成防抖动)
+        self.skin_spots = [((rng.uniform(-30, 22), rng.uniform(-20, 20)), rng.uniform(4.0, 8.0))
+                           for _ in range(4)]  # 迷彩色皮肤斑点(预生成防抖动)
         self.blink_cd = random.uniform(2.0, 5.0)   # 眨眼倒计时
         self.blink = 0.0                           # 眼皮闭合剩余时长
 
     def mouth_pos(self):
-        mx, my = rot2(46, 0, self.heading)
-        return V3(self.pos.x + mx, self.pos.y + my, self.z + 9)
+        mx, my = rot2(36, 0, self.heading)
+        return V3(self.pos.x + mx, self.pos.y + my, self.z + 5.5)
 
     def update(self, dt, move, jump, tongue_cmd, tongue_target, ripples, sounds):
         landed = False
@@ -289,213 +200,48 @@ class Frog:
                     self.tongue = None
         return landed
 
-    def _body_pts(self, z, scale=1.0):
-        """俯视轮廓：前窄后宽、肩部略收的"梨形"蛙体(单条闭合多边形)。"""
-        x, y, h = self.pos.x, self.pos.y, self.heading
-        n = 26
-        pts = []
-        for i in range(n):
-            a = 2 * math.pi * i / n
-            fwd, side = math.cos(a), math.sin(a)
-            rx = 37.0 * (1.0 + 0.16 * max(0.0, -fwd) ** 1.2 - 0.15 * max(0.0, fwd) ** 1.3)
-            ry = 23.5 * (1.0 + 0.08 * max(0.0, -fwd) - 0.09 * max(0.0, fwd)
-                         + 0.05 * side * side)
-            ex, ey = rot2(fwd * rx * scale, side * ry * scale, h)
-            pts.append(V3(x + ex, y + ey, z))
-        return pts
-
-    def _local(self, lx, ly, lz=None):
-        """身体局部坐标(前=+x, 侧=+y) → 世界坐标。"""
-        ex, ey = rot2(lx, ly, self.heading)
-        return V3(self.pos.x + ex, self.pos.y + ey,
-                  self.z + lz if lz is not None else self.z)
-
-    def _foot(self, painter, cam, anchor, phi, hind=True):
-        """把预渲染的脚精灵贴进场景：anchor=脚踝世界坐标, phi=脚趾指向的世界方位角。
-
-        只按景深缩放，不参与透视变形——与身体其余部分的多边形画法混在一起也协调。
-        后足：五趾 + 趾间蹼, 长 18 单位；前足：四趾无蹼, 长 11 单位。
-        脚画在身体下缘的高度并压到 BANK 层: 身体盖住脚踝, 只露脚趾。
-        """
-        p0 = cam.project(V3(anchor.x, anchor.y, anchor.z))
-        if p0 is None:
-            return
-        sx, sy, depth = p0
-        p1 = cam.project(V3(anchor.x + math.cos(phi) * 24.0,
-                            anchor.y + math.sin(phi) * 24.0, anchor.z))
-        if p1 is None:
-            return
-        theta = math.degrees(math.atan2(p1[1] - sy, p1[0] - sx)) + 90.0
-        foot_len, toe_frac = ((FOOT_LEN_HIND, TOE_FRAC_HIND) if hind
-                              else (FOOT_LEN_FRONT, TOE_FRAC_FRONT))
-        target = (foot_len / toe_frac) * cam.focal / depth
-        if target < 4:
-            return
-        img = pygame.transform.rotozoom(foot_sprite(144, hind), theta, target / 144.0)
-        rect = img.get_rect()
-        rect.center = (int(sx), int(sy))            # 图心 = 脚踝, 直接以投影点为中心
-        painter.add(depth - (0.15 if hind else 0.18),
-                    lambda s, img=img, rect=rect: s.blit(img, rect), Painter.BANK)
-
-    def _legs(self, painter, cam, h, z, kick, k_air, wk):
-        """四肢：地面=折叠收拢(大腿肉感贴在体侧, 小腿和脚露在轮廓外),
-        腾空=向后蹬直。画在 BANK 层让身体盖住腿根；关节位置随游动(kick)与相位(wk)微动。
-        """
-        leg_c = mix((98, 162, 70), (58, 104, 44), 0.26)
-        leg_c2 = mix((98, 162, 70), (58, 104, 44), 0.42)
-
-        def W(p, lift):
-            ex, ey = rot2(p[0], p[1], h)
-            return V3(self.pos.x + ex, self.pos.y + ey, z + lift)
-
-        for side in (-1, 1):
-            # ---- 后肢: 髋(体侧内) → 膝(体侧缘) → 踝(轮廓外) → 跗跖 ----
-            # 腿贴着身体半高处(真蛙的大腿和背一样高), 否则斜视角会被高起的身体盖住
-            hip = (-2, side * 11)
-            knee = (15 + 4 * kick - 35 * k_air,
-                    side * (24 + 2 * kick) + wk * 1.5 * side + side * 3 * k_air)
-            ankle = (-10 - 3 * kick - 30 * k_air, side * (35 - 4 * k_air))
-            heel = (-19 - 5 * kick - 33 * k_air, side * (38.5 - 5 * k_air))
-            hw, kw = W(hip, 3.6), W(knee, 4.2)
-            aw, tw = W(ankle, 4.0), W(heel, 3.8)
-            th_ang = math.atan2(kw.y - hw.y, kw.x - hw.x)
-            blob(painter, cam, (hw.x + kw.x) / 2, (hw.y + kw.y) / 2, z + 2.6,
-                 14.0, 8.6, 6.0, leg_c, heading=th_ang, layers=9, taper=0.42,
-                 bias=-0.35, layer=Painter.BANK)
-            limb(painter, cam, kw, aw, 6.2, leg_c, bias=-0.10, layer=Painter.BANK,
-                 taper=0.78)
-            limb(painter, cam, aw, tw, 4.6, leg_c2, bias=0.05, layer=Painter.BANK,
-                 taper=0.82)
-            self._foot(painter, cam, tw,
-                       h + math.pi - side * (0.29 - 0.17 * k_air), hind=True)
-            # ---- 前肢: 肩(体内) → 肘 → 腕(轮廓外), 起跳时前伸准备落地 ----
-            sh = (14, side * 8)
-            el = (18 + 5 * k_air, side * (16 + 1.2 * kick))
-            wr = (19 + 10 * k_air, side * (23 - 2.5 * k_air))
-            shw, elw, wrw = W(sh, 4.0), W(el, 4.2), W(wr, 4.4)
-            limb(painter, cam, shw, elw, 5.2, leg_c, bias=-0.12, layer=Painter.BANK,
-                 taper=0.80)
-            limb(painter, cam, elw, wrw, 4.0, leg_c2, bias=0.06, layer=Painter.BANK,
-                 taper=0.82)
-            self._foot(painter, cam, wrw, h + side * 0.35 - 0.20 * k_air, hind=False)
-
     def draw(self, painter, cam, t, pads):
-        x, y = self.pos
-        h = self.heading
-        z = self.z
-        gz = ground_z(self.pos, pads, t)
-        s = 1.0 - self.z / 170.0
-        swing = math.sin(self.walk_phase) * 9 if self._moving and self.state == "ground" else 0.0
-        airborne = self.state == "air"
-        kick = swing / 9.0                          # -1~1：游动/行走时脚掌向外蹬
-        skin = (98, 162, 70)                        # 背部主色
-        skin_dark = (58, 104, 44)                   # 阴影/边缘
-        # 呼吸(静止时轻轻起伏) + 游动时的身体起伏
-        breathe = 1.0 + (0.02 * math.sin(t * 2.6)
-                         if not airborne and not self._moving else 0.0)
-        bob = abs(math.sin(self.walk_phase)) * 1.6 if (self._moving
-                                                       and not airborne) else 0.0
-        zb = z + bob
-        # 腿部姿态: 地面折叠 ⇄ 腾空后蹬, 按跳跃高度过渡
-        k_air = clamp(z / (self.JUMP_H * 0.8), 0.0, 1.0) if airborne else 0.0
-        wk = math.sin(self.walk_phase) if (self._moving and not airborne) else 0.0
-        soft_shadow(painter, cam, V3(x + 7, y + 5, gz + 0.18), 38 * s, 30 * s, 0.72,
-                    bias=-4, layer=Painter.BANK)   # 影子垫在 BANK 底层, 不压暗腿部颜色
-        self._legs(painter, cam, h, z, kick, k_air, wk)
-        # 身体：多层椭球体(有厚度), 再加一层略大的深色轮廓当投影边
-        flat_polygon(painter, cam, self._body_pts(zb + 4.0, 1.03 * breathe),
-                     shade(skin_dark, 0.9), bias=-1.2)
-        blob(painter, cam, x, y, zb + 4.2, 36.0 * breathe, 23.5 * breathe, 11.5, skin,
-             heading=h, layers=14, taper=0.38, bias=0.3)
-        for (sx, sy), sr in self.skin_spots:                       # 迷彩斑点
-            ex, ey = rot2(sx * 0.92, sy * 0.92, h)
-            flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, zb + 8.4, sr, sr * 0.72, h),
-                         mix(skin_dark, skin, 0.46), bias=0.4)
-        for side in (-1, 1):                                       # 背侧褶: 眼后到后腿的两条浅脊
-            fold = []
-            for i in range(6):
-                f = i / 5
-                ex, ey = rot2(18 - 40 * f, side * (12.5 + 6.5 * math.sin(f * math.pi * 0.9)), h)
-                fold.append(V3(x + ex, y + ey, zb + 11.0))
-            polyline(painter, cam, fold,
-                     add_light(mix(skin, (196, 226, 150), 0.45), 0.05), 2)
-        ridge = []                                                 # 背脊高光
+        """形体交给建模层(models.py)；这里只负责把自身状态传出去。"""
+        models.draw_frog(painter, cam, self, t, pads)
+
+    def draw_tongue(self, painter, cam, t):
+        """舌头伸得很长, 必须画在生物精灵画布之外(否则会被裁掉)。"""
+        if not self.tongue or not self.tongue["tip"]:
+            return
+        tip = self.tongue["tip"]
+        mouth = self.mouth_pos()
         for i in range(7):
-            f = i / 6
-            rx2, ry2 = rot2(-26 + 50 * f, math.sin(f * math.pi) * 3.0, h)
-            ridge.append(V3(x + rx2, y + ry2, zb + 12.6))
-        polyline(painter, cam, ridge, add_light(skin, 0.26), 2)
-        for bx, by, br in ((-10, -9, 7), (6, 8, 8), (-20, 2, 5), (14, -5, 5)):
-            ex, ey = rot2(bx, by, h)
-            flat_polygon(painter, cam, ellipse_pts(x + ex, y + ey, zb + 9.7, br, br * 0.7, h),
-                         mix(skin_dark, skin, 0.38), bias=0.45)
-        # 头：比身体更宽的椭球, 与身体在肩部自然搭接；前端再收一个短吻
-        blob(painter, cam, self._local(25, 0).x, self._local(25, 0).y, zb + 4.4,
-             21.5 * breathe, 22.5 * breathe, 11.0, add_light(skin, 0.03), heading=h,
-             layers=11, taper=0.42, bias=0.6)
-        blob(painter, cam, self._local(40, 0).x, self._local(40, 0).y, zb + 4.4,
-             14.0 * breathe, 15.5 * breathe, 8.5, add_light(skin, 0.05), heading=h,
-             layers=8, taper=0.45, bias=0.7)
-        # 眼罩纹: 从吻端经眼向后的一条深色纵纹(真实蛙的过眼黑纹)
-        for side in (-1, 1):
-            mask = [self._local(46, side * 3.0, 10.9), self._local(39, side * 9.0, 11.6),
-                    self._local(29, side * 14.0, 11.2), self._local(21, side * 16.5, 10.6)]
-            polyline(painter, cam, mask, mix(skin_dark, (34, 56, 34), 0.5), 3)
-        mouth = [self._local(38, -14, 10.4), self._local(45, -7.5, 10.7),
-                 self._local(47, 0, 10.8), self._local(45, 7.5, 10.7),
-                 self._local(38, 14, 10.4)]
-        polyline(painter, cam, mouth, shade(skin, 0.46), 2)
-        for side in (-1, 1):                                       # 鼻孔
-            n0 = self._local(43, side * 3.0, 12.0)
-            sphere(painter, cam, n0, 1.1, shade(skin, 0.52), bias=0.8, sheen=0.4)
-        # 眼睛：头前角的一对鼓包, 鼓包压在眼珠下面(眼珠"长"在头上, 不是浮在头顶)
-        for side in (-1, 1):
-            bulge = self._local(32, side * 13.0)
-            blob(painter, cam, bulge.x, bulge.y, zb + 4.6, 12.5, 11.0, 6.5,
-                 mix(skin, skin_dark, 0.22), heading=h, layers=7, taper=0.40, bias=0.72)
-            eye = self._local(33, side * 13.6, 14.6)
-            if self.blink > 0:                                     # 眨眼: 一层皮色眼皮
-                sphere(painter, cam, self._local(33, side * 13.6, 14.8), 7.4,
-                       mix(skin, skin_dark, 0.18), bias=0.9, sheen=0.25)
-                continue
-            sphere(painter, cam, eye, 7.2, (216, 184, 90), bias=0.85, sheen=0.5)
-            pupil = self._local(36.6, side * 13.8, 15.2)           # 横向椭圆瞳孔
-            flat_polygon(painter, cam,
-                         ellipse_pts(pupil.x, pupil.y, pupil.z, 1.9, 3.3, h),
-                         (36, 28, 22), bias=0.95)
-            glint = self._local(37.6, side * 12.6, 16.3)           # 受光侧的小亮点
-            sphere(painter, cam, glint, 1.1, (246, 246, 230), bias=1.0, sheen=0.0)
-        # 舌头（红色圆珠链，每颗独立深度）
-        if self.tongue and self.tongue["tip"]:
-            tip = self.tongue["tip"]
-            mouth = self.mouth_pos()
-            for i in range(7):
-                p = mouth.lerp(tip, i / 6)
-                sphere(painter, cam, p, 4.6 - 1.5 * (i / 6), (214, 68, 68))
-            sphere(painter, cam, tip, 6.2, (238, 128, 128))
+            p = mouth.lerp(tip, i / 6)
+            sphere(painter, cam, p, 4.6 - 1.5 * (i / 6), (214, 68, 68))
+        sphere(painter, cam, tip, 6.2, (238, 128, 128))
 
 
-# ---------------------------------------------------------------- 果蝇
 class FlyBase:
-    BASE_SPEED = 85.0
+    BASE_SPEED = 85.0 * models.FLY_SCALE / 1.42      # 巡航速度随体型同比放大
+    CRUISE_Z = 16.0 * models.FLY_SCALE               # 巡航高度
+    ESCAPE_Z = CRUISE_Z + 4.0 * models.FLY_SCALE     # 受惊时拔高
+    LAND_Z = 3.0 * models.FLY_SCALE                  # 落在叶面上的身体高度
 
     def __init__(self, pos, seed):
         self.pos = V2(pos)
         self.heading = random.uniform(0, math.tau)
-        self.z = 16.0                  # 飞行高度（身体基准）
-        self.z_target = 16.0
+        self.z = self.CRUISE_Z         # 飞行高度（身体基准）
+        self.z_target = self.CRUISE_Z
         self.wing_phase = random.uniform(0, math.tau)
         self.leg_phase = random.uniform(0, math.tau)
         self.alive = True
         self.buzz_jitter = random.Random(seed).uniform(0.85, 1.15)
+        self.pick_bias = random.Random(seed + 7).uniform(0.8, 1.2)   # 选食个体偏好(拆雷群)
         self.groom_t = 0.0             # 擦眼睛(梳洗)剩余时长
         self.groom_cd = random.uniform(5.0, 9.0)
+        self.food = None               # 当前认领的食饵(抢食统计用)
+        self._food_cd = 0.0            # 等位时的重新选食倒计时
         self.eating_now = False
         self._speed = 0.0
 
     def tip_pos(self):
-        """舌头瞄准点。"""
-        return V3(self.pos.x, self.pos.y, self.z + 3)
+        """舌头瞄准点(略高于身体中心, 随体型缩放)。"""
+        return V3(self.pos.x, self.pos.y, self.z + 3.0 * models.FLY_SCALE)
 
     def move_body(self, dt, speed, turn):
         self._speed = speed
@@ -505,18 +251,23 @@ class FlyBase:
             self.pos.x = clamp(self.pos.x, -MARGIN_X, MARGIN_X)
             self.pos.y = clamp(self.pos.y, -MARGIN_Y, MARGIN_Y)
             self.heading += math.pi
-        if speed > 1 and self.z < 8:
+        if speed > 1 and self.z < self.LAND_Z + 2.0:
             self.leg_phase += dt * speed / 9       # 步态相位随步速推进
-        if self.z > 8:
-            self.wing_phase += dt * 46 * math.tau  # 振翅相位
+        if self.z > self.LAND_Z + 5.0:
+            self.wing_phase += dt * 22 * math.tau  # 振翅相位(约 22 Hz: 60fps 下看得清上下弧)
         self.z += (self.z_target - self.z) * min(1.0, dt * 5)
 
+    GROOM_TIME = 1.6                   # 一次擦眼持续多久
+
     def _update_groom(self, dt):
-        """梳洗周期：落地后每隔几秒用前足擦一次眼睛。"""
+        """梳洗周期：落地后每隔几秒用前足擦一次眼睛。
+
+        间隔与时长都调过——动作本身在池畔视角下只有几个像素, 太短太稀就永远撞不见。
+        """
         self.groom_cd -= dt
         if self.groom_cd <= 0 and self.groom_t <= 0:
-            self.groom_t = 1.2
-            self.groom_cd = random.uniform(4.0, 8.0)
+            self.groom_t = self.GROOM_TIME
+            self.groom_cd = random.uniform(2.5, 5.0)
         if self.groom_t > 0:
             self.groom_t = max(0.0, self.groom_t - dt)
 
@@ -524,154 +275,8 @@ class FlyBase:
         segment(painter, cam, a, b, color, w)
 
     def draw(self, painter, cam, t, pads):
-        x, y = self.pos
-        h = self.heading
-        z = self.z                          # 身体基准高度
-        gz = ground_z(self.pos, pads, t)
-        flying = z > 8
-        sh = clamp(1.0 - z / 55.0, 0.25, 1.0)
-
-        # 影子贴地（不穿进荷叶：影子高度=地面高度）
-        soft_shadow(painter, cam, V3(x + 3 * sh, y + 2 * sh, gz + 0.16),
-                    9.4 * sh, 5.6 * sh, 0.62, bias=-4)
-        # 六足: 髋→膝→足 三点两段, 各状态独立步态
-        legs = (
-            ((2.4, -1.6), (6.2, -3.8), (9.0, -5.6)),
-            ((0.2, -1.9), (2.4, -5.0), (3.0, -7.8)),
-            ((-2.4, -1.8), (-4.8, -4.8), (-7.4, -6.8)),
-            ((2.4, 1.6), (6.2, 3.8), (9.0, 5.6)),
-            ((0.2, 1.9), (2.4, 5.0), (3.0, 7.8)),
-            ((-2.4, 1.8), (-4.8, 4.8), (-7.4, 6.8)),
-        )
-        # 局部坐标 → 世界坐标(随身体朝向旋转)
-        c_, s_ = math.cos(h), math.sin(h)
-
-        def L(vx, vy, vz):
-            return V3(x + (vx * c_ - vy * s_), y + (vx * s_ + vy * c_), vz)
-
-        for i, (hip, knee, foot0) in enumerate(legs):
-            side = 1 if foot0[1] > 0 else -1
-            if flying:
-                jit = math.sin(t * 30 + i * 2.1) * 0.8
-                hp = L(hip[0] * 0.9, hip[1] * 0.9, z + 1.0)
-                kn = L(knee[0] * 0.8, knee[1] * 0.8, z + 0.2)
-                ft = L(foot0[0] - 3.5, foot0[1] * 0.7, z - 2.6 + jit)
-            elif mode_eat(self):
-                if i in (0, 3):                 # 前足搭在食饵上搓动, 辅助进食
-                    rub = math.sin(t * 16 + (0 if i == 0 else math.pi)) * 1.4
-                    hp = L(hip[0], hip[1], z + 1.0)
-                    kn = L(knee[0], knee[1], gz + 1.6)
-                    ft = L(foot0[0] + 1.5, foot0[1] * 0.45 + rub, gz + 0.6)
-                elif i in (1, 4):               # 中足撑在叶面
-                    hp = L(hip[0], hip[1], z + 1.0)
-                    kn = L(knee[0], knee[1], gz + 1.2)
-                    ft = L(foot0[0], foot0[1], gz + 0.3)
-                else:                           # 后足交替微踏
-                    s2 = math.sin(self.leg_phase * 6 + (0 if i == 2 else math.pi)) * 1.4
-                    hp = L(hip[0], hip[1], z + 1.0)
-                    kn = L(knee[0], knee[1], gz + 1.1)
-                    ft = L(foot0[0] + s2, foot0[1], gz + 0.3)
-            elif self.groom_t > 0:              # 前足抬到复眼上画圈擦洗
-                if i in (0, 3):
-                    ph = t * 13 + (0 if i == 0 else math.pi)
-                    hp = L(hip[0], hip[1], z + 1.4)
-                    kn = L(knee[0] * 0.9, knee[1] * 0.9, z + 2.6)
-                    ft = L(6.8 + math.cos(ph) * 1.6, side * 1.9 + math.sin(ph) * 1.1, z + 2.9)
-                elif i in (1, 4):
-                    hp = L(hip[0], hip[1], z + 1.0)
-                    kn = L(knee[0], knee[1], gz + 1.3)
-                    ft = L(foot0[0], foot0[1], gz + 0.3)
-                else:
-                    hp = L(hip[0], hip[1], z + 1.0)
-                    kn = L(knee[0], knee[1], gz + 1.2)
-                    ft = L(foot0[0], foot0[1], gz + 0.3)
-            else:                               # 三角步态行走
-                g = 0 if i in (0, 4, 2) else 1
-                stride = math.sin(self.leg_phase * 6 + g * math.pi) * 2.8
-                hp = L(hip[0], hip[1], z + 1.0)
-                kn = L(knee[0], knee[1], (z + 1.0 + gz) / 2 + 0.6)
-                ft = L(foot0[0] + stride, foot0[1], gz + 0.25)
-            # 股→胫→跗三段锥形, 关节用亮色补圆(不再是一颗颗球)
-            limb(painter, cam, hp, kn, 0.80, (150, 116, 76), taper=0.72)
-            limb(painter, cam, kn, ft, 0.52, (128, 96, 62), taper=0.55)
-        # 身体: 三段连续椭球(头/胸/腹)——偏灰的琥珀棕, 不是橙糖色; 腹部略浅、末端收深
-        thc = rot2(1.0, 0, h)
-        blob(painter, cam, x + thc[0], y + thc[1], z + 0.1, 3.6, 3.0, 4.8,
-             (168, 126, 84), heading=h, layers=10, taper=0.44, bias=0.8)
-        abc = rot2(-4.4, 0, h)
-        blob(painter, cam, x + abc[0], y + abc[1], z + 0.2, 3.5, 2.8, 3.6,
-             (186, 146, 98), heading=h, layers=9, taper=0.52, bias=0.55)
-        tipc = rot2(-8.0, 0, h)
-        sphere(painter, cam, V3(x + tipc[0], y + tipc[1], z + 1.1), 1.6,
-               (118, 84, 56), bias=0.5, sheen=0.55)
-        # 刚毛: 胸部一列背中刚毛(少而清楚, 不堆细节)
-        for k in range(5):
-            bx0, by0 = rot2(-0.6 + 1.1 * k, (k % 2 - 0.5) * 1.3, h)
-            b0 = V3(x + bx0, y + by0, z + 3.4)
-            b1 = V3(b0.x + math.cos(h + math.pi / 2) * 1.1 * (1 if k % 2 else -1),
-                    b0.y + math.sin(h + math.pi / 2) * 1.1 * (1 if k % 2 else -1), z + 4.8)
-            segment(painter, cam, b0, b1, (74, 52, 34), 1, bias=0.5)
-        # 平衡棒（后翅退化成的陀螺仪器官，飞行平衡用）
-        for side in (-1, 1):
-            hp = V3(x + rot2(-2.6, side * 2.4, h)[0], y + rot2(-2.6, side * 2.4, h)[1], z + 1.4)
-            sphere(painter, cam, hp, 0.9, (232, 206, 122), bias=0.5)
-        hd = V3(x + rot2(5.9, 0, h)[0], y + rot2(5.9, 0, h)[1], z + 2.3)
-        sphere(painter, cam, hd, 2.5, (172, 128, 84), bias=1.1, sheen=0.7)
-        # 触角
-        for side in (-1, 1):
-            a1 = V3(x + rot2(7.5, side * 0.9, h)[0], y + rot2(7.5, side * 0.9, h)[1], z + 3.0)
-            a2 = V3(x + rot2(9.1, side * 1.7, h)[0], y + rot2(9.1, side * 1.7, h)[1], z + 3.3)
-            limb(painter, cam, a1, a2, 0.5, (146, 108, 68), bias=-0.2, taper=0.7)
-        # 喙/口器：平时也收在头下(果蝇一直带着口器, 进食时才伸出去)
-        pb = V3(x + rot2(7.3, 0, h)[0], y + rot2(7.3, 0, h)[1], z + 1.1)
-        sphere(painter, cam, pb, 1.0, (132, 92, 60), bias=1.2, sheen=0.4)
-        # 砖红复眼一对：几乎占满头部, 互相贴近成 bilobed 整体(不会误读成两只虫)
-        for side in (-1, 1):
-            e = V3(x + rot2(6.2, side * 1.5, h)[0], y + rot2(6.2, side * 1.5, h)[1], z + 2.9)
-            sphere(painter, cam, e, 2.6, (138, 74, 64), bias=1.4, sheen=0.45)
-        # 口器(进食时伸向食饵)
-        if mode_eat(self):
-            p1 = V3(x + rot2(7.4, 0, h)[0], y + rot2(7.4, 0, h)[1], z + 1.6)
-            p2 = V3(x + rot2(11.2, 0, h)[0], y + rot2(11.2, 0, h)[1], gz + 0.8)
-            self._seg(painter, cam, p1, p2, (146, 108, 68), 2)
-            sphere(painter, cam, p2, 1.3, (132, 92, 60), bias=0.3)
-        # 双翅: 飞行展开振动(带翅脉), 落地收拢在背上
-        wing_c = (228, 233, 231)
-        if flying:
-            for side in (-1, 1):
-                flap = 0.5 * math.sin(self.wing_phase + (0 if side < 0 else math.pi))
-                wang = h + side * (2.15 + flap)
-                wx, wy = math.cos(wang), math.sin(wang)
-                bx, by = rot2(-2, side * 1.6, h)
-                L = 13.0
-                base = V3(x + bx, y + by, z + 2.6)
-
-                def W(u, s, dz):                    # 翅轴 u(0~1) × 横向 s → 世界坐标
-                    return V3(base.x + wx * L * u - wy * side * s,
-                              base.y + wy * L * u + wx * side * s, base.z + dz)
-
-                pts = [base, W(0.30, 2.6, 1.5), W(0.68, 3.0, 1.2),      # 圆头水滴形翅
-                       W(0.97, 1.4, 0.5), W(0.55, -0.9, -0.3)]
-                flat_polygon(painter, cam,
-                             [V3(p.x - wy * side * 0.35, p.y + wx * side * 0.35, p.z + 0.05)
-                              for p in pts], (206, 220, 220), bias=0.26)
-                dome(painter, cam, pts, wing_c, bias=0.3, sheen=0.16)
-                for (u, s) in ((0.95, 0.9), (0.72, 0.2), (0.45, -0.5)):  # 翅脉
-                    limb(painter, cam, W(0.08, 0.2, 0.4), W(u, s, 0.2), 0.22,
-                         (186, 200, 202), bias=0.05, taper=0.6)
-                limb(painter, cam, W(0.10, 1.4, 0.9), W(0.90, 1.5, 0.6), 0.18,
-                     (252, 252, 244), bias=0.02, taper=0.8)      # 前缘高光
-        else:
-            # 收拢的翅: 覆盖在腹部两侧、翅尖略微内收(停歇姿态)
-            for side in (-1, 1):
-                def RL(u, s, dz):                   # 身体局部坐标 → 世界(收翅用)
-                    return V3(x + rot2(u, side * s, h)[0], y + rot2(u, side * s, h)[1], z + dz)
-
-                pts = [RL(-0.6, 1.9, 2.5), RL(-5.2, 2.4, 2.6),
-                       RL(-9.4, 0.7, 2.3), RL(-8.4, 3.2, 2.1)]
-                dome(painter, cam, pts, (220, 227, 224), bias=0.55, layer=4, sheen=0.18)
-                limb(painter, cam, RL(-0.6, 1.9, 2.62), RL(-8.6, 1.6, 2.42), 0.2,
-                     (244, 248, 244), bias=0.4, taper=0.7)
+        """形体交给建模层(models.py)。"""
+        models.draw_fly(painter, cam, self, t, pads)
 
 
 def mode_eat(fly):
@@ -679,7 +284,11 @@ def mode_eat(fly):
 
 
 class ScriptedFly(FlyBase):
-    """脚本化 NPC：航点觅食 → 降落啃食 → 靠近青蛙 110 内拔腿就逃。没有神经元。"""
+    """脚本化 NPC：航点觅食 → 降落啃食 → 靠近青蛙 110 内拔腿就逃。没有神经元。
+
+    遇到神经元个体争食会让位（见 _flee 与 update 里的领域对峙）——
+    对应真实果蝇在食源上的攻击-驱逐行为, 也让"思考者"的竞争优势看得见。
+    """
 
     def __init__(self, pos, seed):
         super().__init__(pos, seed)
@@ -687,48 +296,93 @@ class ScriptedFly(FlyBase):
         self.food = None
         self.flee_t = 0.0
         self.eat_t = 0.0
+        self.displace_t = 0.0          # 被神经元个体逼近时的对峙计时
+        self.yielded = 0               # 统计: 让位次数
+        self.loiter_t = 0.0            # 满座盘旋等位的计时(超过就放弃)
 
-    def update(self, dt, frog, crumbs, t):
+    def _flee(self, threat_pos, flee_t, panic=True):
+        """弃食逃飞: 放弃认领把进食位让出来, 朝远离威胁的方向。"""
+        self.state = "逃离"
+        self.flee_t = flee_t
+        self.groom_t = 0.0                     # 逃跑打断梳洗
+        self.eating_now = False
+        self.food = None                       # 放弃认领, 把进食位让出来
+        away = self.pos - threat_pos
+        self.heading = math.atan2(away.y, away.x) + random.uniform(-0.3, 0.3)
+        self.z_target = self.ESCAPE_Z if panic else self.CRUISE_Z
+
+    def update(self, dt, frog, crumbs, t, brain_fly=None):
         dfrog = self.pos.distance_to(frog.pos)
         if self.state != "逃离" and dfrog < 110:
-            self.state = "逃离"
-            self.flee_t = 1.1
-            away = self.pos - frog.pos
-            self.heading = math.atan2(away.y, away.x) + random.uniform(-0.3, 0.3)
-            self.z_target = 19.0
+            self._flee(frog.pos, 1.1)
+        # 领域让位(荷叶级): 神经元个体落在这片荷叶上 → 半秒内弃食让座。
+        # 真实果蝇的食源攻击就是"领域占有者驱逐入侵者"; 只认"它已落地",
+        # 空中路过/盘旋不算威胁。被挤开不像躲青蛙那样惊慌, 回巡航高度飞走
+        if (self.state == "进食" and brain_fly is not None and brain_fly.alive
+                and brain_fly.resting and brain_fly.z < FlyBase.LAND_Z + 6
+                and brain_fly.pos.distance_to(self.pos) < 72):
+            self.displace_t += dt
+            if self.displace_t > 0.5:
+                self.displace_t = 0.0
+                self.yielded += 1
+                self._flee(brain_fly.pos, 0.8, panic=False)
+        else:
+            self.displace_t = 0.0
         if self.state == "逃离":
             self.flee_t -= dt
             self.move_body(dt, 240, random.uniform(-1, 1) * dt * 2)
             if self.flee_t <= 0 or dfrog > 260:
                 self.state = "觅食"
                 self.food = None
-                self.z_target = 16.0
+                self.z_target = self.CRUISE_Z
         elif self.state == "进食":
             self.eat_t -= dt
-            self.z_target = 3.4
+            self.z_target = self.LAND_Z
+            self.move_body(dt, 0, 0)               # 高度过渡就写在 move_body 里: 落地必须调它
             self._update_groom(dt)
-            self.eating_now = self.groom_t <= 0        # 擦眼睛时前足腾不出空
+            # 落地了才动嘴(下降过程不啃), 擦眼睛时前足也腾不出空;
+            # 开吃闸门带粘性: 已在吃的保持(feeders 里含自己), 没吃则要求餐位空着,
+            # 否则同帧到达的两只会一起落下去(容量=1 时的竞态)
+            self.eating_now = (self.groom_t <= 0 and self.z < self.LAND_Z + 3.5
+                               and (self.eating_now or self.food.feeders == 0))
             if self.eating_now and self.food and self.food.amount > 0:
                 self.food.bite(dt)
             if self.eat_t <= 0 or not self.food or self.food.amount <= 0:
                 self.state = "觅食"
                 self.food = None
                 self.eating_now = False
-                self.z_target = 16.0
+                self.groom_t = 0.0             # 起飞去下一处, 别再擦眼睛
+                self.z_target = self.CRUISE_Z
         else:
-            if self.food is None or self.food.amount <= 0:
-                alive = [c for c in crumbs if c.amount > 0.3]
-                self.food = min(alive, key=lambda c: c.pos().distance_to(self.pos)
-                                + c.crowd * 40) if alive else None
+            self._food_cd = max(0.0, self._food_cd - dt)
+            if self._food_cd <= 0 and (self.food is None or self.food.amount <= 0
+                                       or self.food.full(self)):
+                self.food = pick_food(self.pos, crumbs, self.pick_bias)
+                self._food_cd = 0.45       # 重新权衡的间隔(等位/游荡共用这个节流)
             if self.food:
                 fp = self.food.pos()
                 d = fp.distance_to(self.pos)
                 self.heading += clamp(ang_diff(self.heading, math.atan2(fp.y - self.pos.y,
                                                                         fp.x - self.pos.x)), -1, 1) * 2.6 * dt
-                self.move_body(dt, self.BASE_SPEED * self.buzz_jitter, 0)
-                if d < 9:
-                    self.state = "进食"
-                    self.eat_t = random.uniform(2.6, 3.6)
+                if self.food.full(self):
+                    # 满座: 不硬挤, 大圈缓飞等位(转弯率随个体微差, 圈不重叠);
+                    # 碎屑快见底、或等超过 3.5 秒就放弃——游荡片刻再选,
+                    # 免得所有等位者一窝蜂挤向同一个刚空出的座位
+                    if self.food.amount < 0.8 or self.loiter_t > 3.5:
+                        self.food = None
+                        self.loiter_t = 0.0
+                        self._food_cd = 0.8
+                    else:
+                        self.loiter_t += dt
+                        self.move_body(dt, self.BASE_SPEED * 0.45, 0)
+                        if d < 40:
+                            self.heading += 1.0 * self.buzz_jitter * dt
+                else:
+                    self.loiter_t = 0.0
+                    self.move_body(dt, self.BASE_SPEED * self.buzz_jitter, 0)
+                    if d < 9:
+                        self.state = "进食"
+                        self.eat_t = random.uniform(2.2, 3.2)
             else:
                 self.heading += math.sin(t * 0.8 + self.wing_phase) * 0.8 * dt
                 self.move_body(dt, self.BASE_SPEED * 0.6, 0)
@@ -742,8 +396,10 @@ class ScriptedFly(FlyBase):
 class BrainFly(FlyBase):
     """唯一的"思考者"：脉冲神经网络驱动的果蝇个体（金色框标注）。
 
-    巨纤维逃逸反射比脚本 NPC 灵敏得多（170 就触发，脚本 110），
-    循气味趋向食饵，是否降落进食由歇息回路闸门决定。
+    巨纤维逃逸反射比脚本 NPC 灵敏得多（170 就触发，脚本 110），但会习惯化：
+    蹲着不动的青蛙在旁久了就敢落下进食，头顶掠影则立刻恢复敏感。
+    循气味趋向食饵，是否降落进食由歇息回路闸门决定；落定的荷叶即它的
+    领域——正在同一片荷叶上进食的脚本个体会让位弃食（真实果蝇的食源攻击）。
     """
 
     def __init__(self, pos, seed):
@@ -756,59 +412,75 @@ class BrainFly(FlyBase):
     def _takeoff(self):
         self.brain.resting = False
         self.brain.escape_timer = 0.35
-        self.z_target = 21.0
+        self.z_target = self.ESCAPE_Z
         self.rest_t = 0.0
         self.rest_total = 0.0
+        self.groom_t = 0.0                     # 起飞打断梳洗
+        self.eating_now = False
 
     @property
     def resting(self):
         return self.brain.resting
 
-    def update(self, dt, frog, crumbs, t):
+    def update(self, dt, frog, crumbs, t, brain_fly=None):
         dfrog = self.pos.distance_to(frog.pos)
-        alive_food = [c for c in crumbs if c.amount > 0.3]
-        food = min(alive_food, key=lambda c: c.pos().distance_to(self.pos)
-                   + c.crowd * 40) if alive_food else None
+        # 目标黏性: 正在吃、歇在食饵上、或已进入 60px 内的 committed 进近时锁定
+        # 目标——容量=1 时被占的食饵对选食是"满座", 不锁定就永远在对峙前转身离开
+        if (self.eating_now or (self.brain.resting and self.food is not None
+                                and self.food.amount > 0
+                                and self.pos.distance_to(self.food.pos()) < 30)
+                or (self.food is not None and self.food.amount > 0
+                    and self.pos.distance_to(self.food.pos()) < 60)):
+            food = self.food
+        else:
+            food = pick_food(self.pos, crumbs, self.pick_bias)
+            self.food = food
         food_dist = food.pos().distance_to(self.pos) if food else 999.0
         cmd = self.brain.step(dt, dist_frog=dfrog, frog_airborne=frog.state == "air",
                               pad_dist=food_dist, t=t)
         if cmd["gf_fired"]:
             away = self.pos - frog.pos
             self.heading = math.atan2(away.y, away.x) + random.uniform(-0.3, 0.3)
+        was_eating = self.eating_now
 
         if self.brain.escape_timer > 0:
-            self.z_target = 21.0
+            self.z_target = self.ESCAPE_Z
             self.eating_now = False
+            self.groom_t = 0.0                 # 逃逸起飞打断梳洗
             self.move_body(dt, self.BASE_SPEED * cmd["thrust"], random.uniform(-1, 1) * dt)
         elif self.brain.resting:
-            self.z_target = 3.4
+            # 歇息回路开了就落地——目标被占也照落: 走近对峙, 脚本个体会让位
+            # (领域性; 真实果蝇是在食源上用步足争抢, 不是在空中抢)
+            self.z_target = self.LAND_Z
             self.rest_t += dt
             self.rest_total += dt
             self._update_groom(dt)
             self.eating_now = False
-            if food and food_dist < 26 and food.amount > 0:
-                # 落在食饵上: 平滑转身爬向碎屑(贴近后进入死区, 不再转向防止头尾翻转)
+            if food and food.amount > 0:
+                # 落上叶面就走过去(可能要穿过小半个荷叶), 贴近后进入死区防头尾翻转
                 if food_dist > 8:
                     target = math.atan2(food.pos().y - self.pos.y, food.pos().x - self.pos.x)
                     self.heading = lerp_angle(self.heading, target, 1 - math.exp(-6 * dt))
-                    crawl = min(30.0, food_dist * 4 + 6)
+                    crawl = min(36.0, food_dist * 4 + 8)   # 被占时也要快步逼近对峙
                 else:
                     crawl = 0.0
                 self.move_body(dt, crawl if self.groom_t <= 0 else 0.0, 0)
-                if food_dist < 10 and food.amount > 0 and self.groom_t <= 0:
+                if (food_dist < 10 and food.amount > 0 and self.groom_t <= 0
+                        and self.z < self.LAND_Z + 3.5
+                        and (was_eating or food.feeders == 0)):   # 落地才吃; 闸门带粘性
                     self.eating_now = True
                     food.bite(dt)
-                    self.hunger = max(0.0, self.hunger - dt * 0.35)
+                    self.hunger = max(0.0, self.hunger - dt * 0.22)
                     self.rest_t = 0.0
-                    if food.amount <= 0:
-                        self._takeoff()
+                    if food.amount <= 0 or self.hunger <= 0.05:
+                        self._takeoff()          # 吃光了, 或者吃饱了——把座位让出来
             else:
                 self.move_body(dt, 0, 0)
-            # 主动起飞：2.5 秒没吃到东西，或这顿歇满 12 秒
-            if self.rest_t > 2.5 or self.rest_total > 12.0:
+            # 主动起飞：3.5 秒没吃到东西(含对峙失败)，或这顿歇满 9 秒
+            if self.rest_t > 3.5 or self.rest_total > 9.0:
                 self._takeoff()
         else:
-            self.z_target = 16.0
+            self.z_target = self.CRUISE_Z
             braking = 1.0
             if food and self.brain.escape_timer <= 0:
                 braking = 0.45 if food_dist < 45 else 1.0   # 接近食饵减速, 让歇息电位积累
@@ -816,7 +488,7 @@ class BrainFly(FlyBase):
                                    math.atan2(food.pos().y - self.pos.y, food.pos().x - self.pos.x)), -1, 1)
                 self.heading += k * 1.6 * dt * (0.5 + self.hunger)    # 气味趋向
             self.move_body(dt, self.BASE_SPEED * cmd["thrust"] * self.buzz_jitter * braking, cmd["turn"])
-        self.hunger = min(1.0, self.hunger + dt * 0.02)
+        self.hunger = min(1.0, self.hunger + dt * 0.05)   # 饿得快: 觅食驱力强, 存在感足
 
     def state_name(self):
         return self.brain.state
@@ -846,10 +518,15 @@ class Game:
         self.painter = Painter()
         self._bank_key = None
         self._bank_surf = None
-        self.vignette = scenery.build_vignette(W, H)
+        self._bank_ss = 1
+        self._bank_still = 0
+        self._cam_moved = False
+        self._last_eye = (0.0, 0.0, 0.0, 0.0, 0.0)
         self.bank_props = scenery.make_bank_props()
         self.pads = scenery.make_pads()
-        self.crumbs = [scenery.FoodCrumb(p) for p in self.pads]
+        # 每片荷叶两块碎屑(分居对侧): 容量=1 后全池 12 个餐位, 9 只果蝇有争抢但不会
+        # 全体雷群式涌向唯一空位、把时间都耗在通勤上
+        self.crumbs = [scenery.FoodCrumb(p, side=i) for p in self.pads for i in (0, 1)]
         self.ripples = scenery.Ripples()
         self.duckweed = scenery.make_duckweed()
         self.sounds = SoundKit(enabled=not headless)
@@ -908,8 +585,12 @@ class Game:
             if d < TONGUE_RANGE and ang < TONGUE_CONE and d < best:
                 best, self.aim_target = d, f
         # 食饵拥挤度: 每颗食饵附近已有多少果蝇(供选食时避开拥挤)
-        for c in self.crumbs:
-            c.crowd = sum(1 for f in self.flies if f.pos.distance_to(c.pos()) < 16)
+        for c in self.crumbs:                       # 抢食统计: 认领数 / 正在进食数
+            c.claims = sum(1 for f in self.flies if f.food is c)
+            c.feeders = sum(1 for f in self.flies if f.food is c and f.eating_now)
+            c.inbound = {id(f) for f in self.flies   # 只统计"马上就到"的(36px): 远处过路的
+                         if f.food is c and not f.eating_now  # 不占座, 免得假性满座
+                         and f.pos.distance_to(c.pos()) < 36}
         landed = self.frog.update(dt, move, jump, tongue_cmd, self.aim_target,
                                   self.ripples, self.sounds)
         if landed:
@@ -918,8 +599,9 @@ class Game:
         tip = self.frog.tongue["tip"] if self.frog.tongue else None
         if tip and self.frog.tongue["phase"] in ("out", "hold"):
             self.try_eat_tip(tip)
+        bf = self.brain_fly()
         for f in self.flies:
-            f.update(dt, self.frog, self.crumbs, self.t)
+            f.update(dt, self.frog, self.crumbs, self.t, bf)
         self.flies = [f for f in self.flies if f.alive]
         self.spawn_timer += dt
         if self.spawn_timer > 5.0 and len(self.flies) < TARGET_FLIES:
@@ -944,7 +626,8 @@ class Game:
             p["pos"].z += 30 * dt
             p["life"] -= dt
         self.popups = [p for p in self.popups if p["life"] > 0]
-        buzz = max((1 - f.pos.distance_to(self.frog.pos) / 430 for f in self.flies if f.z > 8),
+        buzz = max((1 - f.pos.distance_to(self.frog.pos) / 430
+                    for f in self.flies if f.z > FlyBase.LAND_Z + 5.0),
                    default=0.0)
         self.sounds.set_buzz(max(0.0, min(1.0, buzz)) * 0.55)
         self.shake = max(0.0, self.shake - dt)
@@ -1057,10 +740,16 @@ class Game:
             eye += V3(random.uniform(-1, 1) * self.shake * 14,
                       random.uniform(-1, 1) * self.shake * 10,
                       random.uniform(-1, 1) * self.shake * 8)
+        moving = (abs(eye.x - self._last_eye[0]) + abs(eye.y - self._last_eye[1])
+                  + abs(eye.z - self._last_eye[2])
+                  + abs(self.cam_target.x - self._last_eye[3]) * 0.5
+                  + abs(self.cam_target.y - self._last_eye[4]) * 0.5) > 0.35
+        self._cam_moved = moving
+        self._last_eye = (eye.x, eye.y, eye.z, self.cam_target.x, self.cam_target.y)
         self.cam.set_view(eye, self.cam_target)
         scenery.draw_sky(surf, self.cam, self.t)
         painter, cam = self.painter, self.cam
-        scenery.draw_pond(painter, cam, self.t)
+        scenery.draw_pond(painter, cam, self.t, moving=self._cam_moved)
         self._paint_bank_base(painter, cam)
         scenery.draw_bank_plants(painter, cam, self.t, self.bank_props)
         self.ripples.draw(painter, cam)
@@ -1076,6 +765,7 @@ class Game:
         if bf:
             bf.draw(painter, cam, self.t, self.pads)
         self.frog.draw(painter, cam, self.t, self.pads)
+        self.frog.draw_tongue(painter, cam, self.t)
         for p in self.particles:
             sphere(painter, cam, p["pos"], 1.6 * p["life"] + 0.6, p["color"])
         painter.flush(surf)
@@ -1093,36 +783,50 @@ class Game:
                 label = self.font.render(p["text"], True, (255, 236, 180))
                 label.set_alpha(max(0, min(255, int(p["life"] * 260))))
                 surf.blit(label, label.get_rect(midbottom=(int(sp[0]), int(sp[1]))))
-        surf.blit(self.vignette, (0, 0))
         self._draw_hud()
 
     def _paint_bank_base(self, painter, cam):
-        """岸上静态布景（堤壁/草地/卵石/岩石/灌木）按机位缓存成一张贴图。
+        """岸上静态布景（堤壁/草地/卵石/岩石/灌木）。
 
-        这些内容只跟机位有关，机位不动时每帧只 blit 一次，省下上千次多边形/圆形绘制；
-        会摇摆的草丛与芦苇仍走每帧实时绘制。
+        只跟机位有关, 因此缓存成一张贴图; 机位一停就再用 2× 超采样重画一遍,
+        缩回原尺寸后整片岸景的轮廓都是抗锯齿的——转动时先用 1× 保证跟手,
+        停下后再"补一遍清晰度"(渐进式抗锯齿)。
         """
         key = (round(self.cam_yaw, 4), round(self.cam_elev, 4), round(self.dist, 2),
                round(self.cam_target.x, 1), round(self.cam_target.y, 1),
                self.shake > 0)
         if self._bank_key != key:
-            cache = pygame.Surface((W, H), pygame.SRCALPHA)
-            sub = Painter()
-            scenery.draw_beach_base(sub, cam)          # 静态湿沙滩(在堤壁之下先画)
-            scenery.draw_bank_base(sub, cam, self.bank_props)
-            sub.flush(cache)
-            self._bank_key, self._bank_surf = key, cache
+            self._bank_key, self._bank_ss, self._bank_still = key, 1, 0
+            self._bank_surf = self._render_bank(cam, 1)
+        else:
+            self._bank_still += 1
+            if self._bank_ss < 2 and self._bank_still > 5:
+                self._bank_ss = 2
+                self._bank_surf = self._render_bank(cam, 2)
         img = self._bank_surf
-        # 深度取最大 → 在 BANK 层里最先画, 荷叶/生物仍然照常盖在它上面
         painter.add(1e6, lambda s, img=img: s.blit(img, (0, 0)), Painter.BANK)
+
+    def _render_bank(self, cam, ss):
+        """按 ss 倍分辨率渲染静态岸景, 再缩回窗口尺寸(ss>1 时即为抗锯齿)。"""
+        cache = pygame.Surface((W * ss, H * ss), pygame.SRCALPHA)
+        sub = Painter()
+        scam = SubCamera(cam, 0, 0, ss)
+        scenery.draw_beach_base(sub, scam)
+        scenery.draw_bank_base(sub, scam, self.bank_props)
+        sub.flush(cache)
+        if ss > 1:
+            cache = pygame.transform.smoothscale(cache, (W, H))
+        return cache
 
     def _draw_brackets(self, surf, bf):
         """金色方框 + 状态标注：标出唯一的神经元个体。"""
-        sp = self.cam.project(V3(bf.pos.x, bf.pos.y, bf.z + 6))
+        sp = self.cam.project(V3(bf.pos.x, bf.pos.y,
+                                 bf.z + 5.5 * models.FLY_SCALE))
         if sp is None:
             return
         sx, sy, depth = sp
-        r = clamp(self.cam.focal * 22 / depth, 20, 130) * (1 + 0.05 * math.sin(self.t * 5))
+        r = clamp(self.cam.focal * 21 * models.FLY_SCALE / depth, 24, 200) \
+            * (1 + 0.05 * math.sin(self.t * 5))
         corner = r * 0.45
         for cx, cyy, dx, dy in ((sx - r, sy - r, 1, 1), (sx + r, sy - r, -1, 1),
                                 (sx - r, sy + r, 1, -1), (sx + r, sy + r, -1, -1)):

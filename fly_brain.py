@@ -5,7 +5,10 @@
 
   环路                    果蝇中的真实对应                          本模型中的作用
   巨纤维系统 (GF)         视叶→巨轴突→逃逸反射，数毫秒内出手        感知青蛙逼近/头顶阴影，
-                                                                   膜电位超过阈值立即发放→逃逸
+                                                                   膜电位超过阈值立即发放→逃逸；
+                                                                   对反复无害的静止威胁会习惯化
+                                                                   (真实 GF 环路的经典性质)，蹲着
+                                                                   不动的青蛙久了就敢落下进食
   中央复合体 (CX)         航向整合、巡航行进控制                     左右两个慢振荡器竞争产生
                                                                    平滑、有惯性的随机游走
   歇息/觉醒切换           果蝇间歇性的停歇-起飞行为                  悬停在荷叶上空时积累电位，
@@ -68,6 +71,8 @@ class FlyBrain:
 
         self.escape_timer = 0.0
         self.refractory = 0.0             # GF 不应期，防止逃逸连发
+        self.hab = 0.0                    # GF 习惯化程度 0(全敏感)→1(全脱敏)
+        self.threat_eff = 0.0             # 最近一帧的有效威胁(供身体层决策)
         self.resting = False
         self.state = self.WANDER
         self.gf_count = 0                 # 统计：一生逃逸反射次数
@@ -79,13 +84,23 @@ class FlyBrain:
         threat = max(0.0, 1.0 - dist_frog / 260.0)
         if frog_airborne and dist_frog < 160.0:
             threat = min(1.0, threat * 3.0)      # 头顶掠过的阴影 = 巨纤维的最强刺激
+            self.hab = 0.0                       # 掠影无法被习惯化: 恢复全部敏感度
+        elif threat > 0.3:
+            self.hab = min(1.0, self.hab + dt * 0.5 * threat)   # 持续暴露→逐渐脱敏感
+        else:
+            self.hab = max(0.0, self.hab - dt * 0.06)           # 威胁远去→慢慢恢复敏感
+        # 习惯化后的有效威胁: 蹲着不动的青蛙再近也只是"背景", 但衰减有下限,
+        # 贴脸 (<~70px) 仍会触发逃逸——比脚本果蝇的 110 更难骗, 但不再永久锁死进食
+        threat_eff = threat * (1.0 - 0.55 * self.hab)
+        self.threat_eff = threat_eff          # 供身体层判断"现在敢不敢落地抢食"
         rest_fill = max(0.0, 1.0 - pad_dist / 40.0)
-        rest_drive = 45.0 * rest_fill if (threat < 0.25 and not self.resting) else 0.0
+        # 歇息闸门比逃逸宽松(0.32): 习惯化后 75px 外就敢落下来吃, 但贴脸逃逸仍在
+        rest_drive = 45.0 * rest_fill if (threat_eff < 0.32 and not self.resting) else 0.0
 
         # --- 环路更新 ---
         gf_fired = False
         if self.refractory <= 0:
-            gf_fired = self.gf.step(dt, 55.0 * threat)
+            gf_fired = self.gf.step(dt, 55.0 * threat_eff)
         else:
             self.gf.step(dt, 0.0)
         osc_l = 0.5 + 0.45 * math.sin(t * self.freq + self.phase)
@@ -115,7 +130,7 @@ class FlyBrain:
             turn = 0.0
             thrust = 0.0
             self.state = self.REST
-            if threat >= 0.25:                   # 被惊扰：立刻起飞
+            if threat_eff >= 0.32:               # 被惊扰：立刻起飞
                 self.resting = False
                 self.escape_timer = 0.4
                 self.state = self.TAKEOFF
