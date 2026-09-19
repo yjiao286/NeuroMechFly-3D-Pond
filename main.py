@@ -492,13 +492,19 @@ class BrainFly(FlyBase):
             self.eating_now = False
             if self.contest_t > 0.0 and self.contest_foe is not None:
                 # 对峙中: 面向对手; 不在同一块食饵上/还离得远时先快步逼近,
-                # 贴近(26px)才站定输出——隔着半片荷叶挥拳只像抽风。
-                # 周期性的冲撞猛探由姿态层(models.draw_fly)按 contest_t 叠加
+                # 贴近(20px)才站定输出——隔着半片荷叶挥拳只像抽风。
+                # 战利品逻辑: 对手的碗明显更近就直接改打那只碗, 赢了立刻吃,
+                # 打架的时间成本才算有回报
                 ang = math.atan2(self.contest_foe.pos.y - self.pos.y,
                                  self.contest_foe.pos.x - self.pos.x)
                 self.heading = lerp_angle(self.heading, ang, 1 - math.exp(-8 * dt))
                 dfoe = self.contest_foe.pos.distance_to(self.pos)
-                if dfoe > 26:
+                foe_food = self.contest_foe.food
+                if foe_food is not None and foe_food.amount > 0.8:
+                    d_mine = self.food.pos().distance_to(self.pos) if self.food else 1e9
+                    if foe_food.pos().distance_to(self.pos) + 20.0 < d_mine:
+                        self.food = foe_food           # 打的就是你的碗
+                if dfoe > 20:                # 站进全幅度冲撞圈(22px)内再开打
                     self.move_body(dt, min(60.0, dfoe * 2.0 + 18.0), 0)
                 else:
                     self.move_body(dt, 0, 0)

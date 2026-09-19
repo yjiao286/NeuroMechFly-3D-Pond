@@ -532,7 +532,9 @@ def draw_fly(painter, cam, fly, t, pads):
     foe = getattr(fly, "contest_foe", None)
     if getattr(fly, "contest_t", 0.0) > 0.0 and foe is not None:
         if getattr(fly, "contest_role", "") == "attacker":
-            prox = clamp(1.15 - foe.pos.distance_to(fly.pos) / 34.0, 0.0, 1.0)
+            # 贴脸(≤22px)全力, 32px 外不出拳(还在逼近路上); 与逻辑层的
+            # 20px 站定阈值对齐——站定的位置必须在全幅度圈内
+            prox = clamp((32.0 - foe.pos.distance_to(fly.pos)) / 10.0, 0.0, 1.0)
             lunge = prox * max(0.0, math.sin(fly.contest_t * 7.0)) ** 1.5
         else:
             crouch = clamp(fly.contest_t / 1.5, 0.0, 1.0)
