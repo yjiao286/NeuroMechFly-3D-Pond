@@ -15,7 +15,7 @@ import math
 
 import pygame
 
-from render3d import (LIGHT_XY, V3, add_light, blob, clamp, dome, ellipse_pts,
+from render3d import (LIGHT_XY, V3, add_light, blob, clamp, dome,
                       flat_polygon, limb, loft, mix, polyline, ribbon_pts, scaled2d,
                       segment, shade, soft_shadow, sphere, translucent_polys)
 

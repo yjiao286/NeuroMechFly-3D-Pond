@@ -414,6 +414,7 @@ class ScriptedFly(FlyBase):
                     if d < 9:
                         self.state = "进食"
                         self.eat_t = random.uniform(2.2, 3.2)
+                        self._approach_t = 0.0       # 落地清零: 别把上一轮的滞留带给新目标
             else:
                 self.heading += math.sin(t * 0.8 + self.wing_phase) * 0.8 * dt
                 self.move_body(dt, self.BASE_SPEED * 0.6, 0)
