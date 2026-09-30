@@ -598,10 +598,12 @@ def polyline(painter, cam, pts3, color, width=1, layer=4):
 
 def limb(painter, cam, a, b, r0, color, bias=0.0, layer=4, taper=0.62,
          shade_ratio=0.86, cap=False):
-    """锥形肢体/茎：近端半径 r0、远端 r0×taper, 带圆柱明暗。
+    """锥形肢体/茎：近端半径 r0、远端 r0×taper，带圆柱明暗。
 
     以前用"粗线段"画, 近距离放大就露出方头和方肩; 现在画的是真正的胶囊多边形
     (两侧切线 + 两端半圆), 再叠一层向光偏移的亮面, 粗肢体也圆润。
+    bias>0 = 视觉上前置(与 sphere/flat_polygon 等一致); 细线/胶囊两条路径
+    的符号必须一致, 否则肢体在远近之间缩放时前后关系会翻转。
     """
     va, vb = cam.view(a), cam.view(b)
     near = cam.NEAR
@@ -678,4 +680,4 @@ def limb(painter, cam, a, b, r0, color, bias=0.0, layer=4, taper=0.62,
             pygame.draw.circle(s, core, (int(bx + lx * rb * 0.30),
                                          int(by + ly * rb * 0.30)), max(1, int(rb * 0.8)))
 
-    painter.add(depth + bias, draw, layer)
+    painter.add(depth - bias, draw, layer)
