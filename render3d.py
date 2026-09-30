@@ -593,7 +593,7 @@ def polyline(painter, cam, pts3, color, width=1, layer=4):
     def draw(s, pts=pts2d, c=color, w=width):
         pygame.draw.lines(s, c, False, pts, w)
 
-    painter.add(depth, draw)
+    painter.add(depth, draw, layer)
 
 
 def limb(painter, cam, a, b, r0, color, bias=0.0, layer=4, taper=0.62,

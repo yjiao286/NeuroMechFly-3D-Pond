@@ -331,7 +331,7 @@ class ScriptedFly(FlyBase):
             self._flee(foe.pos, 0.8, panic=False)
         if self.state == "逃离":
             self.flee_t -= dt
-            self.move_body(dt, self.flee_speed, random.uniform(-1, 1) * dt * 2)
+            self.move_body(dt, self.flee_speed, random.uniform(-1, 1) * 2)
             if self.flee_t <= 0 or dfrog > 260:
                 self.state = "觅食"
                 self.food = None
@@ -418,8 +418,6 @@ class ScriptedFly(FlyBase):
             else:
                 self.heading += math.sin(t * 0.8 + self.wing_phase) * 0.8 * dt
                 self.move_body(dt, self.BASE_SPEED * 0.6, 0)
-        if self.state != "进食":
-            self.move_body(dt, 0, 0)   # 仅用于高度过渡
 
     def state_name(self):
         return self.state
@@ -482,7 +480,7 @@ class BrainFly(FlyBase):
             # 刚落地就被"歇满 9 秒"条款赶走, 形成落地-起飞循环
             self.rest_t = 0.0
             self.rest_total = 0.0
-            self.move_body(dt, self.BASE_SPEED * cmd["thrust"], random.uniform(-1, 1) * dt)
+            self.move_body(dt, self.BASE_SPEED * cmd["thrust"], random.uniform(-1, 1))
         elif self.brain.resting:
             # 歇息回路开了就落地——目标被占也照落: 走近对峙, 脚本个体会让位
             # (领域性; 真实果蝇是在食源上用步足争抢, 不是在空中抢)
